@@ -477,6 +477,8 @@ async def _tabulate_gemini(
 @dataclass
 class AnalysisResult:
     chat_id: str
+    contact_id: int | None = None
+    atendimento_id: int | None = None
     message_count: int = 0
     media_count: int = 0
     window_start: str = ""
@@ -493,6 +495,8 @@ async def run_full_analysis(conversation: ConversationData) -> AnalysisResult:
     """Executa as 3 fases de análise IA em sequência."""
     result = AnalysisResult(
         chat_id=conversation.chat_id,
+        contact_id=conversation.contact_id,
+        atendimento_id=conversation.atendimento_id,
         message_count=conversation.message_count,
         media_count=conversation.media_count,
         window_start=str(conversation.window_start or ""),

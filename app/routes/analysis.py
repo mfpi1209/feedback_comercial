@@ -1,5 +1,6 @@
 """
 Endpoints para disparar e consultar análises IA de conversas comerciais.
+Suporta análise por chat_id (legacy) e por atendimento (recomendado).
 """
 
 import json
@@ -7,11 +8,12 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 
 from app.database import async_session
 from app.models.analysis import AnalysisResultDB
-from app.services.conversation_builder import build_conversation
+from app.models.atendimento import Atendimento
+from app.services.conversation_builder import build_conversation, build_conversation_by_atendimento
 from app.services.ai_analyzer import run_full_analysis
 from app.services.supabase_client import insert_feedback_comercial, build_feedback_row
 
@@ -20,11 +22,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/kommo/analysis", tags=["analysis"])
 
 
-# ---- rotas fixas ANTES de /{chat_id} para evitar conflito ----
+# ---- rotas fixas ----
 
 @router.get("/debug/supabase")
 async def debug_supabase():
-    """Testa a conexão com Supabase e verifica se está configurado."""
+    """Testa a conexão com Supabase."""
     from app.config import get_settings
     s = get_settings()
     configured = bool(s.supabase_url and s.supabase_key)
@@ -52,6 +54,7 @@ async def debug_supabase():
             result["test_error"] = str(e)
     return result
 
+
 @router.get("/status/overview")
 async def analysis_status():
     """Status geral das análises."""
@@ -74,11 +77,31 @@ async def analysis_status():
         )
         avg_nota = avg_q.scalar()
 
+        atend_total_q = await session.execute(
+            select(func.count()).select_from(Atendimento)
+        )
+        atend_total = atend_total_q.scalar() or 0
+
+        atend_analyzed_q = await session.execute(
+            select(func.count()).select_from(Atendimento)
+            .where(Atendimento.status == "analisado")
+        )
+        atend_analyzed = atend_analyzed_q.scalar() or 0
+
+        atend_pending_q = await session.execute(
+            select(func.count()).select_from(Atendimento)
+            .where(Atendimento.status == "fechado")
+        )
+        atend_pending = atend_pending_q.scalar() or 0
+
     return {
         "total_analyses": total,
         "supabase_synced": synced,
         "pending_sync": total - synced,
         "average_nota": round(avg_nota, 2) if avg_nota else None,
+        "atendimentos_total": atend_total,
+        "atendimentos_analisados": atend_analyzed,
+        "atendimentos_pendentes": atend_pending,
     }
 
 
@@ -110,6 +133,8 @@ async def list_analyses(
             {
                 "analysis_id": r.id,
                 "chat_id": r.chat_id,
+                "contact_id": r.contact_id,
+                "atendimento_id": r.atendimento_id,
                 "analyzed_at": str(r.analyzed_at),
                 "consultor": r.consultor_responsavel,
                 "nota": r.nota_atendimento,
@@ -122,22 +147,111 @@ async def list_analyses(
     }
 
 
-# ---- rotas dinâmicas com /{chat_id} ----
+# ---- rotas por atendimento (recomendado) ----
+
+@router.post("/atendimento/{atendimento_id}")
+async def trigger_atendimento_analysis(
+    atendimento_id: int,
+    force: bool = Query(False, description="Forçar re-análise"),
+):
+    """
+    Dispara análise completa de um atendimento (multi-chat).
+    Agrega mensagens de todos os chat_ids do atendimento.
+    """
+    async with async_session() as session:
+        atend_q = await session.execute(
+            select(Atendimento).where(Atendimento.id == atendimento_id)
+        )
+        atend = atend_q.scalar_one_or_none()
+
+    if not atend:
+        raise HTTPException(status_code=404, detail=f"Atendimento {atendimento_id} não encontrado")
+
+    if not force:
+        async with async_session() as session:
+            existing = await session.execute(
+                select(AnalysisResultDB)
+                .where(AnalysisResultDB.atendimento_id == atendimento_id)
+                .order_by(AnalysisResultDB.analyzed_at.desc())
+                .limit(1)
+            )
+            row = existing.scalars().first()
+            if row:
+                return {
+                    "status": "already_analyzed",
+                    "detail": "Análise já existe. Use force=true para re-analisar.",
+                    "analysis_id": row.id,
+                    "atendimento_id": atendimento_id,
+                    "consultor": row.consultor_responsavel,
+                    "nota": row.nota_atendimento,
+                }
+
+    logger.info("Iniciando análise para atendimento %d (force=%s)", atendimento_id, force)
+
+    conversation = await build_conversation_by_atendimento(atendimento_id)
+
+    if conversation.message_count == 0:
+        raise HTTPException(status_code=404, detail="Nenhuma mensagem encontrada para este atendimento")
+
+    analysis = await run_full_analysis(conversation)
+
+    chat_ids_json = json.dumps(conversation.chat_ids)
+    analysis_id = await _save_analysis(
+        analysis, chat_ids_json, atend.contact_id, atendimento_id,
+        atend.lead_id, atend.lead_nome, atend.lead_telefone,
+        conversation,
+    )
+
+    async with async_session() as session:
+        await session.execute(
+            update(Atendimento)
+            .where(Atendimento.id == atendimento_id)
+            .values(status="analisado", updated_at=datetime.now(timezone.utc))
+        )
+        await session.commit()
+
+    return {
+        "status": "completed",
+        "analysis_id": analysis_id,
+        "atendimento_id": atendimento_id,
+        "contact_id": atend.contact_id,
+        "chat_ids": conversation.chat_ids,
+        "message_count": analysis.message_count,
+        "media_count": analysis.media_count,
+        "consultor_responsavel": analysis.consultor_responsavel,
+        "nota_atendimento": analysis.nota_atendimento,
+        "sentiment": analysis.sentiment,
+        "summary": analysis.summary,
+    }
+
+
+@router.get("/atendimento/{atendimento_id}")
+async def get_atendimento_analysis(atendimento_id: int):
+    """Retorna a última análise de um atendimento."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(AnalysisResultDB)
+            .where(AnalysisResultDB.atendimento_id == atendimento_id)
+            .order_by(AnalysisResultDB.analyzed_at.desc())
+            .limit(1)
+        )
+        row = result.scalars().first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Nenhuma análise encontrada para este atendimento")
+
+    return _format_analysis_row(row)
+
+
+# ---- rotas legacy por chat_id ----
 
 @router.post("/{chat_id}")
 async def trigger_analysis(
     chat_id: str,
     hours: int | None = Query(None, description="Janela de horas (None = todas)"),
-    force: bool = Query(False, description="Forçar re-análise mesmo se já existir"),
+    force: bool = Query(False, description="Forçar re-análise"),
 ):
-    """
-    Dispara análise completa de um chat:
-    1. Monta transcript enriquecido (com transcrição de mídias)
-    2. Resumo via IA
-    3. Análise de sentimento
-    4. Tabulação comercial
-    5. Salva no banco local + Supabase
-    """
+    """[Legacy] Dispara análise de um chat_id individual."""
     if not force:
         async with async_session() as session:
             existing = await session.execute(
@@ -150,26 +264,66 @@ async def trigger_analysis(
             if row:
                 return {
                     "status": "already_analyzed",
-                    "detail": "Análise já existe. Use force=true para re-analisar.",
+                    "detail": "Use /atendimento/{id} para análise multi-chat. Use force=true para re-analisar.",
                     "analysis_id": row.id,
-                    "analyzed_at": str(row.analyzed_at),
-                    "consultor": row.consultor_responsavel,
-                    "nota": row.nota_atendimento,
-                    "sentiment": row.sentiment,
                 }
 
-    logger.info("Iniciando análise para chat %s (hours=%s, force=%s)", chat_id, hours, force)
-
     conversation = await build_conversation(chat_id, hours=hours)
-
     if conversation.message_count == 0:
-        raise HTTPException(status_code=404, detail=f"Nenhuma mensagem encontrada para chat {chat_id}")
+        raise HTTPException(status_code=404, detail=f"Nenhuma mensagem para chat {chat_id}")
 
     analysis = await run_full_analysis(conversation)
 
+    lead_id, lead_nome, lead_telefone = await _get_lead_info_for_chat(chat_id)
+
+    analysis_id = await _save_analysis(
+        analysis, json.dumps([chat_id]), None, None,
+        lead_id, lead_nome, lead_telefone, conversation,
+    )
+
+    return {
+        "status": "completed",
+        "analysis_id": analysis_id,
+        "chat_id": chat_id,
+        "message_count": analysis.message_count,
+        "consultor_responsavel": analysis.consultor_responsavel,
+        "nota_atendimento": analysis.nota_atendimento,
+        "sentiment": analysis.sentiment,
+        "summary": analysis.summary,
+    }
+
+
+@router.get("/{chat_id}")
+async def get_analysis(chat_id: str):
+    """[Legacy] Retorna a última análise de um chat_id."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(AnalysisResultDB)
+            .where(AnalysisResultDB.chat_id == chat_id)
+            .order_by(AnalysisResultDB.analyzed_at.desc())
+            .limit(1)
+        )
+        row = result.scalars().first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Nenhuma análise para chat {chat_id}")
+
+    return _format_analysis_row(row)
+
+
+# ---- helpers ----
+
+async def _save_analysis(
+    analysis, chat_id_value: str, contact_id, atendimento_id,
+    lead_id, lead_nome, lead_telefone,
+    conversation,
+) -> int:
+    """Salva resultado da análise no banco local e no Supabase."""
     async with async_session() as session:
         db_row = AnalysisResultDB(
-            chat_id=chat_id,
+            chat_id=chat_id_value,
+            contact_id=contact_id,
+            atendimento_id=atendimento_id,
             analyzed_at=datetime.now(timezone.utc),
             window_start=conversation.window_start,
             window_end=conversation.window_end,
@@ -188,14 +342,35 @@ async def trigger_analysis(
         await session.refresh(db_row)
         analysis_id = db_row.id
 
+    try:
+        row_data = build_feedback_row(
+            analysis, chat_id_value,
+            lead_id=lead_id, lead_nome=lead_nome, lead_telefone=lead_telefone,
+            contact_id=contact_id, atendimento_id=atendimento_id,
+        )
+        supa_result = await insert_feedback_comercial(row_data)
+        if supa_result:
+            async with async_session() as session:
+                db_row = await session.get(AnalysisResultDB, analysis_id)
+                if db_row:
+                    db_row.supabase_synced = True
+                    await session.commit()
+    except Exception as e:
+        logger.error("Erro ao gravar no Supabase: %s", e)
+
+    return analysis_id
+
+
+async def _get_lead_info_for_chat(chat_id: str) -> tuple:
+    """Busca lead_id, nome e telefone para um chat."""
+    from app.models.message import KommoMessage
+    from app.models.monitored_chat import MonitoredChat
+
     lead_id = None
     lead_nome = None
     lead_telefone = None
     try:
         async with async_session() as session:
-            from app.models.message import KommoMessage
-            from app.models.monitored_chat import MonitoredChat
-
             lead_row = await session.execute(
                 select(KommoMessage.lead_id, KommoMessage.sender_name, KommoMessage.sender_phone)
                 .where(KommoMessage.chat_id == chat_id, KommoMessage.sender_type == "contact")
@@ -218,59 +393,15 @@ async def trigger_analysis(
                     lead_id = mon
     except Exception:
         pass
-
-    supabase_ok = False
-    try:
-        row_data = build_feedback_row(
-            analysis, chat_id,
-            lead_id=lead_id, lead_nome=lead_nome, lead_telefone=lead_telefone,
-        )
-        supa_result = await insert_feedback_comercial(row_data)
-        if supa_result:
-            supabase_ok = True
-            async with async_session() as session:
-                db_row = await session.get(AnalysisResultDB, analysis_id)
-                if db_row:
-                    db_row.supabase_synced = True
-                    await session.commit()
-    except Exception as e:
-        logger.error("Erro ao gravar no Supabase: %s", e)
-
-    return {
-        "status": "completed",
-        "analysis_id": analysis_id,
-        "chat_id": chat_id,
-        "message_count": analysis.message_count,
-        "media_count": analysis.media_count,
-        "window_start": analysis.window_start,
-        "window_end": analysis.window_end,
-        "consultor_responsavel": analysis.consultor_responsavel,
-        "nota_atendimento": analysis.nota_atendimento,
-        "sentiment": analysis.sentiment,
-        "summary": analysis.summary,
-        "tabulation": analysis.tabulation,
-        "supabase_synced": supabase_ok,
-    }
+    return lead_id, lead_nome, lead_telefone
 
 
-@router.get("/{chat_id}")
-async def get_analysis(chat_id: str):
-    """Retorna a última análise salva de um chat."""
-    async with async_session() as session:
-        result = await session.execute(
-            select(AnalysisResultDB)
-            .where(AnalysisResultDB.chat_id == chat_id)
-            .order_by(AnalysisResultDB.analyzed_at.desc())
-            .limit(1)
-        )
-        row = result.scalars().first()
-
-    if not row:
-        raise HTTPException(status_code=404, detail=f"Nenhuma análise encontrada para chat {chat_id}")
-
+def _format_analysis_row(row: AnalysisResultDB) -> dict:
     return {
         "analysis_id": row.id,
         "chat_id": row.chat_id,
+        "contact_id": row.contact_id,
+        "atendimento_id": row.atendimento_id,
         "analyzed_at": str(row.analyzed_at),
         "message_count": row.message_count,
         "media_count": row.media_count,

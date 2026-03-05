@@ -68,6 +68,8 @@ def build_feedback_row(
     lead_id: int | None = None,
     lead_nome: str | None = None,
     lead_telefone: str | None = None,
+    contact_id: int | None = None,
+    atendimento_id: int | None = None,
 ) -> dict:
     """
     Converte um AnalysisResult em dict pronto para inserção no Supabase.

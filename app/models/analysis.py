@@ -14,6 +14,8 @@ class AnalysisResultDB(Base):
     id: Mapped[int] = mapped_column(AutoPK, primary_key=True, autoincrement=True)
 
     chat_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    contact_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    atendimento_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     analyzed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )

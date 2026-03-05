@@ -68,9 +68,15 @@ async def discover_and_register_chats() -> int:
 
             if talk.chat_id in existing_map:
                 mon = existing_map[talk.chat_id]
+                changed = False
                 if talk.lead_id and (not mon.lead_id or mon.lead_id == 0):
                     mon.lead_id = talk.lead_id
                     mon.label = label
+                    changed = True
+                if talk.contact_id and not mon.contact_id:
+                    mon.contact_id = talk.contact_id
+                    changed = True
+                if changed:
                     updated_count += 1
                 continue
 
@@ -78,6 +84,7 @@ async def discover_and_register_chats() -> int:
                 chat_id=talk.chat_id,
                 label=label,
                 lead_id=talk.lead_id,
+                contact_id=talk.contact_id,
                 active=True,
             )
             db.add(chat)

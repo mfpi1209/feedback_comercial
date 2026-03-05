@@ -1,16 +1,17 @@
 """
 Monta o transcript enriquecido de uma conversa:
-- Busca mensagens do banco
+- Busca mensagens do banco (por chat_id individual ou por atendimento multi-chat)
 - Processa mídias (transcrição/descrição via IA)
 - Produz texto formatado pronto para análise
 """
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from app.database import async_session
 from app.models.message import KommoMessage
@@ -24,6 +25,9 @@ MAX_CONCURRENT_MEDIA = 5
 @dataclass
 class ConversationData:
     chat_id: str
+    contact_id: int | None = None
+    chat_ids: list[str] = field(default_factory=list)
+    atendimento_id: int | None = None
     transcript: str = ""
     message_count: int = 0
     media_count: int = 0
@@ -89,6 +93,11 @@ async def build_conversation(
         result.transcript = "Nenhuma mensagem encontrada."
         return result
 
+    return await _build_transcript(result, messages)
+
+
+async def _build_transcript(result: ConversationData, messages: list) -> ConversationData:
+    """Lógica compartilhada: processa mídias e monta transcript a partir de mensagens."""
     result.message_count = len(messages)
     result.window_start = messages[0].sent_at
     result.window_end = messages[-1].sent_at
@@ -151,7 +160,59 @@ async def build_conversation(
     result.cliente_names = sorted(cliente_set)
 
     logger.info(
-        "Conversa %s: %d msgs, %d mídias processadas, %d chars transcript",
-        chat_id, result.message_count, result.media_count, len(result.transcript),
+        "Conversa %s: %d msgs, %d mídias, %d chars transcript",
+        result.chat_id[:20], result.message_count, result.media_count, len(result.transcript),
     )
     return result
+
+
+async def build_conversation_by_atendimento(
+    atendimento_id: int,
+) -> ConversationData:
+    """
+    Monta transcript enriquecido a partir de um atendimento (multi-chat).
+    Busca TODAS as mensagens de TODOS os chat_ids do atendimento,
+    ordena cronologicamente e monta um transcript único.
+    """
+    from app.models.atendimento import Atendimento
+
+    async with async_session() as session:
+        atend_q = await session.execute(
+            select(Atendimento).where(Atendimento.id == atendimento_id)
+        )
+        atend = atend_q.scalar_one_or_none()
+
+    if not atend:
+        result = ConversationData(chat_id="", atendimento_id=atendimento_id)
+        result.transcript = "Atendimento não encontrado."
+        return result
+
+    chat_ids = json.loads(atend.chat_ids_json) if atend.chat_ids_json else []
+
+    result = ConversationData(
+        chat_id=",".join(chat_ids),
+        contact_id=atend.contact_id,
+        chat_ids=chat_ids,
+        atendimento_id=atendimento_id,
+    )
+
+    if not chat_ids:
+        result.transcript = "Nenhum chat_id associado ao atendimento."
+        return result
+
+    async with async_session() as session:
+        query = (
+            select(KommoMessage)
+            .where(KommoMessage.chat_id.in_(chat_ids))
+            .where(KommoMessage.sent_at >= atend.session_start)
+            .where(KommoMessage.sent_at <= atend.session_end)
+            .order_by(KommoMessage.sent_at.asc())
+        )
+        rows = await session.execute(query)
+        messages = rows.scalars().all()
+
+    if not messages:
+        result.transcript = "Nenhuma mensagem encontrada no período do atendimento."
+        return result
+
+    return await _build_transcript(result, messages)

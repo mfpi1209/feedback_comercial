@@ -93,7 +93,7 @@ async def _poll_chat(chat: MonitoredChat) -> int:
                 dialect_insert(KommoMessage)
                 .values(
                     lead_id=chat.lead_id or 0,
-                    contact_id=None,
+                    contact_id=chat.contact_id,
                     talk_id=str(msg.dialog_id or ""),
                     chat_id=msg.chat_id or chat.chat_id,
                     sender_name=msg.sender_name,
@@ -142,6 +142,7 @@ async def add_chat_to_monitor(
     chat_id: str,
     label: str | None = None,
     lead_id: int | None = None,
+    contact_id: int | None = None,
     do_initial_sync: bool = True,
 ) -> dict:
     """
@@ -169,6 +170,7 @@ async def add_chat_to_monitor(
             chat_id=chat_id,
             label=label,
             lead_id=lead_id,
+            contact_id=contact_id,
             active=True,
         )
         db.add(new_chat)
@@ -186,7 +188,7 @@ async def add_chat_to_monitor(
                         dialect_insert(KommoMessage)
                         .values(
                             lead_id=lead_id or 0,
-                            contact_id=None,
+                            contact_id=contact_id,
                             talk_id=str(msg.dialog_id or ""),
                             chat_id=msg.chat_id or chat_id,
                             sender_name=msg.sender_name,

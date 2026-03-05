@@ -32,4 +32,5 @@ class KommoMessage(Base):
     __table_args__ = (
         Index("ix_kommo_messages_lead_sent", "lead_id", "sent_at"),
         Index("ix_kommo_messages_chat_sent", "chat_id", "sent_at"),
+        Index("ix_kommo_messages_contact_sent", "contact_id", "sent_at"),
     )
