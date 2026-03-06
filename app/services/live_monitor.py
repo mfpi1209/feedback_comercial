@@ -6,7 +6,7 @@ detecta mensagens novas e grava no banco automaticamente.
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,17 +17,62 @@ from app.models.monitored_chat import MonitoredChat
 from app.services.kommo_chats import fetch_chat_history
 from app.services.rate_limiter import get_usage
 from app.services.token_manager import get_current_token
+from app.services.n8n_dispatcher import get_dispatcher
 
 logger = logging.getLogger(__name__)
 
-MIN_CYCLE_SECONDS = 30
-DELAY_BETWEEN_CHATS = 1.0
+
+def _build_message_payload(msg, chat) -> dict:
+    """Monta o payload da mensagem para Supabase e n8n."""
+    direction = "inbound" if msg.sender_type == "contact" else "outbound"
+    consultor = msg.sender_name if msg.sender_type == "user" else None
+    sent_at_iso = msg.sent_at.isoformat() if msg.sent_at else None
+
+    return {
+        "message_uid": msg.uid,
+        "chat_id": msg.chat_id or chat.chat_id,
+        "contact_id": chat.contact_id,
+        "lead_id": chat.lead_id or 0,
+        "lead_nome": chat.label,
+        "direction": direction,
+        "sender_type": msg.sender_type,
+        "sender_name": msg.sender_name,
+        "message_text": msg.text,
+        "message_type": msg.message_type,
+        "media_url": msg.media_url,
+        "sent_at": sent_at_iso,
+        "consultor_responsavel": consultor,
+        "origin": msg.sender_origin,
+    }
+
+
+def _dispatch_message(payload: dict) -> None:
+    """Enfileira mensagem no dispatcher centralizado para o n8n."""
+    get_dispatcher().enqueue({"event": "new_message", **payload})
+
+
+MIN_CYCLE_SECONDS = 5
+CONCURRENT_POLLS = 3
+
+TIER_HOT_HOURS = 2
+TIER_WARM_HOURS = 24
+WARM_EVERY_N = 20
+COLD_EVERY_N = 100
+MAX_WARM_PER_CYCLE = 50
+MAX_COLD_PER_CYCLE = 30
+
+_cycle_count = 0
+_semaphore: asyncio.Semaphore | None = None
 
 
 async def run_live_monitor():
-    """Loop principal do monitor. Roda indefinidamente."""
-    logger.info("Monitor ao vivo iniciado (min ciclo: %ds, delay entre chats: %.1fs)",
-                MIN_CYCLE_SECONDS, DELAY_BETWEEN_CHATS)
+    """Loop principal do monitor com polling paralelo por prioridade."""
+    global _cycle_count, _semaphore
+    _semaphore = asyncio.Semaphore(CONCURRENT_POLLS)
+    logger.info(
+        "Monitor ao vivo iniciado (hot=%dh, parallel=%d, warm_cada=%d, cold_cada=%d)",
+        TIER_HOT_HOURS, CONCURRENT_POLLS, WARM_EVERY_N, COLD_EVERY_N,
+    )
 
     while True:
         try:
@@ -36,24 +81,26 @@ async def run_live_monitor():
                 await asyncio.sleep(MIN_CYCLE_SECONDS)
                 continue
 
+            _cycle_count += 1
+            include_warm = (_cycle_count % WARM_EVERY_N == 0)
+            include_cold = (_cycle_count % COLD_EVERY_N == 0)
+
             async with async_session() as db:
-                chats = await _get_active_chats(db)
+                chats = await _get_prioritized_chats(db, include_warm, include_cold)
+
+            tier_label = "hot"
+            if include_cold:
+                tier_label = "hot+warm+cold"
+            elif include_warm:
+                tier_label = "hot+warm"
 
             if chats:
-                total_new = 0
-                for i, chat in enumerate(chats):
-                    try:
-                        count = await _poll_chat(chat)
-                        total_new += count
-                    except Exception:
-                        logger.exception("Erro ao monitorar chat %s", chat.chat_id)
+                total_new = await _poll_all_parallel(chats)
 
-                    if i < len(chats) - 1:
-                        await asyncio.sleep(DELAY_BETWEEN_CHATS)
-
-                if total_new > 0:
-                    logger.info("Monitor: %d novas mensagens de %d chats | %s",
-                                total_new, len(chats), get_usage())
+                logger.info(
+                    "Monitor ciclo #%d [%s]: %d chats, %d novas msgs | %s",
+                    _cycle_count, tier_label, len(chats), total_new, get_usage(),
+                )
 
         except Exception:
             logger.exception("Erro no loop do monitor")
@@ -61,34 +108,121 @@ async def run_live_monitor():
         await asyncio.sleep(MIN_CYCLE_SECONDS)
 
 
-async def _get_active_chats(db: AsyncSession) -> list[MonitoredChat]:
-    """Busca todos os chats marcados como ativos para monitoramento."""
-    stmt = select(MonitoredChat).where(MonitoredChat.active == True)
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
+async def _poll_all_parallel(chats: list) -> int:
+    """Faz polling de todos os chats em paralelo, limitado pelo semaforo."""
+    results = await asyncio.gather(
+        *[_poll_chat_safe(chat) for chat in chats],
+        return_exceptions=True,
+    )
+    return sum(r for r in results if isinstance(r, int))
+
+
+async def _poll_chat_safe(chat) -> int:
+    """Poll com semaforo para limitar concorrencia."""
+    async with _semaphore:
+        try:
+            return await _poll_chat(chat)
+        except Exception:
+            logger.exception("Erro ao monitorar chat %s", chat.chat_id)
+            return 0
+
+
+async def _get_prioritized_chats(
+    db: AsyncSession,
+    include_warm: bool,
+    include_cold: bool,
+) -> list[MonitoredChat]:
+    """
+    Polling por prioridade:
+    - HOT (atividade nas ultimas TIER_HOT_HOURS): sempre
+    - WARM (atividade nas ultimas TIER_WARM_HOURS): a cada WARM_EVERY_N ciclos
+    - COLD (sem atividade / muito antigo): a cada COLD_EVERY_N ciclos
+    """
+    now = datetime.now(timezone.utc)
+    hot_cutoff = now - timedelta(hours=TIER_HOT_HOURS)
+
+    hot_q = await db.execute(
+        select(MonitoredChat)
+        .where(
+            MonitoredChat.active == True,
+            MonitoredChat.last_message_at >= hot_cutoff,
+        )
+        .order_by(MonitoredChat.last_message_at.desc())
+    )
+    hot = list(hot_q.scalars().all())
+
+    if not include_warm and not include_cold:
+        return hot
+
+    warm_cutoff = now - timedelta(hours=TIER_WARM_HOURS)
+
+    if include_warm or include_cold:
+        warm_q = await db.execute(
+            select(MonitoredChat)
+            .where(
+                MonitoredChat.active == True,
+                MonitoredChat.last_message_at < hot_cutoff,
+                MonitoredChat.last_message_at >= warm_cutoff,
+            )
+            .order_by(MonitoredChat.last_message_at.desc())
+            .limit(MAX_WARM_PER_CYCLE)
+        )
+        warm = list(warm_q.scalars().all())
+    else:
+        warm = []
+
+    if include_cold:
+        cold_q = await db.execute(
+            select(MonitoredChat)
+            .where(
+                MonitoredChat.active == True,
+                (MonitoredChat.last_message_at < warm_cutoff)
+                | (MonitoredChat.last_message_at.is_(None)),
+            )
+            .order_by(MonitoredChat.last_message_at.desc().nulls_last())
+            .limit(MAX_COLD_PER_CYCLE)
+        )
+        cold = list(cold_q.scalars().all())
+    else:
+        cold = []
+
+    total = hot + warm + cold
+    if include_warm or include_cold:
+        logger.info(
+            "Chats selecionados: %d hot + %d warm + %d cold = %d total",
+            len(hot), len(warm), len(cold), len(total),
+        )
+    return total
 
 
 async def _poll_chat(chat: MonitoredChat) -> int:
     """
     Verifica um chat por mensagens novas.
-    Busca a página mais recente e insere apenas as que ainda não existem.
+    Busca a página mais recente, coleta as novas, e despacha em ordem cronológica.
     """
     messages = await fetch_chat_history(chat.chat_id, limit=50, offset=0)
     if not messages:
         return 0
 
+    new_msgs = []
+    for msg in messages:
+        if not msg.uid:
+            continue
+        if chat.last_message_uid and msg.uid == chat.last_message_uid:
+            break
+        new_msgs.append(msg)
+
+    if not new_msgs:
+        return 0
+
+    latest_uid = new_msgs[0].uid
+    latest_at = new_msgs[0].sent_at
+
+    new_msgs.reverse()
+
     inserted = 0
-    latest_uid = None
-    latest_at = None
-
     async with async_session() as db:
-        for msg in messages:
-            if not msg.uid:
-                continue
-
-            if chat.last_message_uid and msg.uid == chat.last_message_uid:
-                break
-
+        for msg in new_msgs:
             stmt = (
                 dialect_insert(KommoMessage)
                 .values(
@@ -112,12 +246,9 @@ async def _poll_chat(chat: MonitoredChat) -> int:
             result = await db.execute(stmt)
             if result.rowcount and result.rowcount > 0:
                 inserted += 1
+                _dispatch_message(_build_message_payload(msg, chat))
 
-            if latest_uid is None:
-                latest_uid = msg.uid
-                latest_at = msg.sent_at
-
-        if latest_uid and inserted > 0:
+        if inserted > 0:
             await db.execute(
                 update(MonitoredChat)
                 .where(MonitoredChat.id == chat.id)
@@ -207,6 +338,25 @@ async def add_chat_to_monitor(
                     result = await db.execute(stmt)
                     if result.rowcount and result.rowcount > 0:
                         count += 1
+                        direction = "inbound" if msg.sender_type == "contact" else "outbound"
+                        consultor = msg.sender_name if msg.sender_type == "user" else None
+                        payload = {
+                            "message_uid": msg.uid,
+                            "chat_id": msg.chat_id or chat_id,
+                            "contact_id": contact_id,
+                            "lead_id": lead_id or 0,
+                            "lead_nome": label,
+                            "direction": direction,
+                            "sender_type": msg.sender_type,
+                            "sender_name": msg.sender_name,
+                            "message_text": msg.text,
+                            "message_type": msg.message_type,
+                            "media_url": msg.media_url,
+                            "sent_at": msg.sent_at.isoformat() if msg.sent_at else None,
+                            "consultor_responsavel": consultor,
+                            "origin": msg.sender_origin,
+                        }
+                        _dispatch_message(payload)
 
                 if messages:
                     await db.execute(

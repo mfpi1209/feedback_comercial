@@ -12,13 +12,14 @@ from app.routes.webhook import router as webhook_router
 from app.routes.token import router as token_router
 from app.routes.dashboard import router as dashboard_router
 from app.routes.monitor import router as monitor_router
-from app.routes.analysis import router as analysis_router
 from app.routes.atendimento import router as atendimento_router
+from app.routes.n8n import router as n8n_router
 from app.services.chat_discovery import run_chat_discovery
 from app.services.live_monitor import run_live_monitor
 from app.services.atendimento_detector import run_atendimento_detector
-from app.services.auto_analyzer import run_auto_analyzer
 from app.services.token_manager import init_from_settings, get_current_token
+from app.services.token_renewer import run_token_renewer
+from app.services.n8n_dispatcher import get_dispatcher
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,11 +54,19 @@ async def lifespan(app: FastAPI):
             "Adicione chats manualmente via POST /api/kommo/monitor/chats"
         )
 
+    tasks.append(asyncio.create_task(get_dispatcher().run()))
+    logger.info("Dispatcher n8n iniciado")
+
     tasks.append(asyncio.create_task(run_atendimento_detector()))
     logger.info("Detector de atendimentos iniciado")
 
-    tasks.append(asyncio.create_task(run_auto_analyzer()))
-    logger.info("Auto-analyzer iniciado")
+    if settings.kommo_login_email and settings.kommo_login_password:
+        tasks.append(asyncio.create_task(run_token_renewer()))
+        logger.info("Token renewer automatico iniciado")
+    else:
+        logger.warning(
+            "KOMMO_LOGIN_EMAIL/PASSWORD nao configurados — renovacao automatica de token desabilitada"
+        )
 
     yield
 
@@ -81,8 +90,8 @@ app.include_router(monitor_router)
 app.include_router(messages_router)
 app.include_router(webhook_router)
 app.include_router(token_router)
-app.include_router(analysis_router)
 app.include_router(atendimento_router)
+app.include_router(n8n_router)
 
 
 @app.get("/", include_in_schema=False)

@@ -121,30 +121,41 @@ async def fetch_chat_history(
     }
 
     from app.services.rate_limiter import acquire
+    from app.services.token_manager import force_refresh
+
     messages: list[ChatMessage] = []
-    async with await get_amojo_v1_client() as client:
-        await acquire()
-        resp = await client.get(path, params=params)
 
-        if resp.status_code == 204:
-            return []
-        if resp.status_code == 401:
-            logger.error("x-auth-token expirado ou inválido (401). Atualize KOMMO_AMOJO_TOKEN.")
-            return []
-        if resp.status_code == 429:
-            logger.warning("Rate limit 429 do Kommo! Aguardando 60s...")
-            await asyncio.sleep(60)
-            return []
-        resp.raise_for_status()
+    for attempt in range(2):
+        async with await get_amojo_v1_client() as client:
+            await acquire()
+            resp = await client.get(path, params=params)
 
-        data = resp.json()
-        items = data if isinstance(data, list) else data.get("messages", [])
+            if resp.status_code == 204:
+                return []
+            if resp.status_code == 401:
+                if attempt == 0:
+                    logger.warning("x-auth-token 401 — tentando refresh e retry...")
+                    refreshed = await force_refresh()
+                    if refreshed:
+                        continue
+                logger.error("x-auth-token expirado e refresh falhou. Atualize via PUT /api/kommo/token")
+                return []
+            if resp.status_code == 429:
+                logger.warning("Rate limit 429 do Kommo! Aguardando 60s...")
+                await asyncio.sleep(60)
+                return []
+            resp.raise_for_status()
 
-        for entry in items:
-            try:
-                messages.append(_parse_message(entry))
-            except Exception:
-                logger.exception("Erro ao parsear mensagem: %s", entry.get("id", "?"))
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get("messages", [])
+
+            for entry in items:
+                try:
+                    messages.append(_parse_message(entry))
+                except Exception:
+                    logger.exception("Erro ao parsear mensagem: %s", entry.get("id", "?"))
+
+            return messages
 
     return messages
 

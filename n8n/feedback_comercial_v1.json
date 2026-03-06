@@ -1,0 +1,835 @@
+{
+  "name": "feedback_comercial_v1",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "feedback_comercial",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-960, -400],
+      "id": "wh-comercial-01",
+      "name": "Webhook Comercial",
+      "webhookId": "feedback_comercial"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.item.json;\nconst body = input.body || input;\n\nconst event = body.event;\nif (event !== 'atendimento_fechado') {\n  return [{ json: { skip: true, reason: 'evento ignorado: ' + event } }];\n}\n\nconst messages = body.messages || [];\nif (messages.length === 0) {\n  return [{ json: { skip: true, reason: 'sem mensagens' } }];\n}\n\nmessages.sort((a, b) => new Date(a.sent_at) - new Date(b.sent_at));\n\nlet transcriptForAI = '';\nconst dbRecords = [];\n\nfor (const msg of messages) {\n  const role = msg.role || 'BOT';\n  const name = msg.sender_name || role;\n  const content = msg.message_text || '';\n  const mediaType = (msg.message_type || 'text').toUpperCase();\n  const hasMedia = msg.has_media === true;\n\n  let displayContent = content;\n  if (hasMedia && msg.media_url) {\n    const mediaNote = `[Midia: ${mediaType}]`;\n    displayContent = content ? `${content} ${mediaNote}` : mediaNote;\n  }\n\n  const dateStr = msg.sent_at\n    ? new Date(msg.sent_at).toLocaleString('pt-BR')\n    : '';\n\n  transcriptForAI += `[${dateStr}] **${name} (${role}):** ${displayContent}\\n`;\n\n  dbRecords.push({\n    message_uid: msg.message_uid,\n    chat_id: msg.chat_id,\n    sent_at: msg.sent_at,\n    sender_type: role,\n    sender_name: name,\n    raw_sender_type: msg.sender_type,\n    text_content: content,\n    has_media: hasMedia,\n    media_url: msg.media_url || null,\n    media_type: hasMedia ? mediaType : null,\n    direction: msg.direction,\n    origin: msg.origin\n  });\n}\n\nreturn [{\n  json: {\n    skip: false,\n    atendimento_id: body.atendimento_id,\n    contact_id: body.contact_id,\n    lead_id: body.lead_id,\n    lead_nome: body.lead_nome,\n    lead_telefone: body.lead_telefone,\n    session_start: body.session_start,\n    session_end: body.session_end,\n    message_count: messages.length,\n    chat_ids: body.chat_ids || [],\n    transcript_ia: transcriptForAI,\n    db_records: dbRecords\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-736, -400],
+      "id": "proc-msgs-01",
+      "name": "Processar Mensagens"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "filter-skip",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [-512, -400],
+      "id": "filter-skip-01",
+      "name": "Filtrar Eventos Validos"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict", "version": 2 },
+                "conditions": [
+                  {
+                    "id": "sw-audio",
+                    "leftValue": "={{ $json.transcript_ia }}",
+                    "rightValue": "VOICE",
+                    "operator": { "type": "string", "operation": "contains" }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict", "version": 2 },
+                "conditions": [
+                  {
+                    "id": "sw-video",
+                    "leftValue": "={{ $json.transcript_ia }}",
+                    "rightValue": "VIDEO",
+                    "operator": { "type": "string", "operation": "contains" }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict", "version": 2 },
+                "conditions": [
+                  {
+                    "id": "sw-file",
+                    "leftValue": "={{ $json.transcript_ia }}",
+                    "rightValue": "FILE",
+                    "operator": { "type": "string", "operation": "contains" }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict", "version": 2 },
+                "conditions": [
+                  {
+                    "id": "sw-picture",
+                    "leftValue": "={{ $json.transcript_ia }}",
+                    "rightValue": "PICTURE",
+                    "operator": { "type": "string", "operation": "contains" }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.3,
+      "position": [-288, -400],
+      "id": "sw-media-check",
+      "name": "Tem Midia?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\nconst records = item.db_records || [];\nconst medias = records.filter(r => r.has_media === true);\n\nif (medias.length === 0) {\n  return [{ json: { media_count: 0, medias: [] } }];\n}\n\nconst output = medias.map(m => ({\n  message_uid: m.message_uid,\n  sent_at: m.sent_at,\n  media_type: m.media_type,\n  media_url: m.media_url,\n  sender_type: m.sender_type,\n  sender_name: m.sender_name\n}));\n\nreturn [{ json: { media_count: output.length, medias: output } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [0, -600],
+      "id": "extract-media-01",
+      "name": "Extrair Midias"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\nconst medias = item.medias || [];\n\nconst grouped = {\n  VOICE: [],\n  VIDEO: [],\n  FILE: [],\n  PICTURE: []\n};\n\nfor (const m of medias) {\n  const tipo = (m.media_type || '').toUpperCase();\n  if (grouped[tipo]) grouped[tipo].push(m);\n}\n\nconst saida = [];\nfor (const tipo of Object.keys(grouped)) {\n  if (grouped[tipo].length > 0) {\n    saida.push({\n      json: {\n        media_type: tipo,\n        count: grouped[tipo].length,\n        messages: grouped[tipo]\n      }\n    });\n  }\n}\n\nreturn saida.length > 0 ? saida : [{ json: { media_type: 'NONE', count: 0, messages: [] } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [224, -600],
+      "id": "group-media-01",
+      "name": "Agrupar por Tipo"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "media_type",
+        "include": "allOtherFields",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [448, -600],
+      "id": "split-media-01",
+      "name": "Split por Tipo"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+                "conditions": [{ "leftValue": "={{ $json.media_type }}", "rightValue": "VOICE", "operator": { "type": "string", "operation": "equals" }, "id": "rt-voice" }],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "VOICE"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+                "conditions": [{ "id": "rt-video", "leftValue": "={{ $json.media_type }}", "rightValue": "VIDEO", "operator": { "type": "string", "operation": "equals" } }],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "VIDEO"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+                "conditions": [{ "id": "rt-file", "leftValue": "={{ $json.media_type }}", "rightValue": "FILE", "operator": { "type": "string", "operation": "equals" } }],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "FILE"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+                "conditions": [{ "id": "rt-picture", "leftValue": "={{ $json.media_type }}", "rightValue": "PICTURE", "operator": { "type": "string", "operation": "equals" } }],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "PICTURE"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.3,
+      "position": [672, -600],
+      "id": "sw-media-type",
+      "name": "Rota por Tipo"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $json.messages\n  .filter(m => m.media_url)\n  .map(m => ({ json: { media_url: m.media_url, message_uid: m.message_uid } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, -800],
+      "id": "urls-voice",
+      "name": "URLs Audio"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.media_url }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1184, -800],
+      "id": "dl-voice",
+      "name": "Download Audio"
+    },
+    {
+      "parameters": {
+        "resource": "audio",
+        "operation": "transcribe",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2,
+      "position": [1408, -800],
+      "id": "transcribe-voice",
+      "name": "Transcrever Audio",
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_OPENAI_CRED_ID",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "af-audio", "name": "text", "value": "=Audio: {{ $json.text }}", "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1632, -800],
+      "id": "set-voice",
+      "name": "Formatar Audio"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $json.messages\n  .filter(m => m.media_url)\n  .map(m => ({ json: { media_url: m.media_url, message_uid: m.message_uid } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, -600],
+      "id": "urls-video",
+      "name": "URLs Video"
+    },
+    {
+      "parameters": {
+        "resource": "video",
+        "operation": "analyze",
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-2.5-flash",
+          "mode": "list",
+          "cachedResultName": "models/gemini-2.5-flash"
+        },
+        "text": "Descreva sobre o que se trata o video de forma resumida.",
+        "videoUrls": "={{ $json.media_url }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1,
+      "position": [1184, -600],
+      "id": "analyze-video",
+      "name": "Analisar Video",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googlePalmApi": {
+          "id": "REPLACE_GEMINI_CRED_ID",
+          "name": "Google Gemini"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "af-video", "name": "text", "value": "=Video: {{ $json.content.parts[0].text }}", "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1408, -600],
+      "id": "set-video",
+      "name": "Formatar Video"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $json.messages\n  .filter(m => m.media_url)\n  .map(m => ({ json: { media_url: m.media_url, message_uid: m.message_uid } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, -400],
+      "id": "urls-file",
+      "name": "URLs Arquivo"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.media_url }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1184, -400],
+      "id": "dl-file",
+      "name": "Download Arquivo"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/files",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer REPLACE_OPENAI_KEY" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "purpose", "value": "assistants" },
+            { "parameterType": "formBinaryData", "name": "file", "inputDataFieldName": "data" }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1408, -400],
+      "id": "upload-file",
+      "name": "Upload OpenAI",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/responses",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer REPLACE_OPENAI_KEY" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4.1\",\n  \"input\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        { \"type\": \"input_file\", \"file_id\": \"{{ $json.id }}\" },\n        { \"type\": \"input_text\", \"text\": \"Somente transcreva o que esta no arquivo, nao fale mais nada\" }\n      ]\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1632, -400],
+      "id": "ocr-file",
+      "name": "OCR Arquivo",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "af-file", "name": "text", "value": "=Arquivo: {{ $json.output[0].content[0].text }}", "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1856, -400],
+      "id": "set-file",
+      "name": "Formatar Arquivo"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $json.messages\n  .filter(m => m.media_url)\n  .map(m => ({ json: { media_url: m.media_url, message_uid: m.message_uid } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, -200],
+      "id": "urls-picture",
+      "name": "URLs Imagem"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.media_url }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1184, -200],
+      "id": "dl-picture",
+      "name": "Download Imagem"
+    },
+    {
+      "parameters": {
+        "resource": "image",
+        "operation": "analyze",
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list",
+          "cachedResultName": "GPT-4O"
+        },
+        "text": "Resuma o que esta na imagem de forma objetiva",
+        "inputType": "base64",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2,
+      "position": [1408, -200],
+      "id": "analyze-picture",
+      "name": "Analisar Imagem",
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_OPENAI_CRED_ID",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "af-img", "name": "text", "value": "=Imagem: {{ $json['0'].content[0].text }}", "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1632, -200],
+      "id": "set-picture",
+      "name": "Formatar Imagem"
+    },
+    {
+      "parameters": { "numberInputs": 5 },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [2080, -500],
+      "id": "merge-media",
+      "name": "Merge Midias"
+    },
+    {
+      "parameters": {
+        "jsCode": "const all = items.map(i => i.json);\n\nconst janela = all.find(o => o && o.db_records);\nif (!janela) {\n  return [{ json: { error: 'sem dados de janela', db_records: [] } }];\n}\n\nlet dbRecords = (janela.db_records || []).slice();\ndbRecords.sort((a, b) => new Date(a.sent_at) - new Date(b.sent_at));\n\nconst extrasAll = all.filter(o => !o.db_records && typeof o.text === 'string');\n\nif (extrasAll.length > 0) {\n  let idxExtra = 0;\n  dbRecords = dbRecords.map(r => {\n    const rec = { ...r };\n    if (rec.has_media && rec.media_type && idxExtra < extrasAll.length) {\n      rec.text_content = extrasAll[idxExtra].text;\n      rec.has_media = false;\n      rec.media_type = null;\n      idxExtra++;\n    }\n    return rec;\n  });\n}\n\nreturn [{ json: { ...janela, db_records: dbRecords } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2320, -400],
+      "id": "inject-transcriptions",
+      "name": "Injetar Transcricoes"
+    },
+    {
+      "parameters": {
+        "jsCode": "const janela = $json;\nconst records = janela.db_records || [];\n\nreturn records.map(r => ({\n  json: {\n    message_uid: r.message_uid,\n    chat_id: r.chat_id,\n    sender_type: r.sender_type,\n    sender_name: r.sender_name,\n    mensagem: r.text_content || '',\n    message_at: r.sent_at,\n    consultor_nome: r.sender_type === 'CONSULTOR' ? (r.sender_name || '') : null,\n    direction: r.direction\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2560, -400],
+      "id": "flatten-msgs",
+      "name": "Achatar Mensagens"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nif (!items.length) {\n  return [{ json: { conversa_bruta: '' } }];\n}\n\nconst linhas = items.map(item => {\n  const j = item.json;\n  const role = j.sender_type || 'BOT';\n  const name = (j.sender_name || '').trim();\n  const consultor = (j.consultor_nome || '').trim();\n  const msg = j.mensagem || '';\n  const hora = j.message_at || '';\n\n  let papel;\n  if (role === 'CLIENTE') {\n    papel = 'CLIENTE';\n  } else if (role === 'CONSULTOR' && consultor) {\n    papel = `CONSULTOR (${consultor})`;\n  } else {\n    papel = 'BOT';\n  }\n\n  return `[${hora}] ${papel}: ${msg}`;\n});\n\nreturn [{ json: { conversa_bruta: linhas.join('\\n') } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2800, -400],
+      "id": "build-transcript",
+      "name": "Montar Transcricao"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-2.5-flash-lite",
+          "mode": "list",
+          "cachedResultName": "models/gemini-2.5-flash-lite"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Segue o historico do atendimento comercial para voce resumir:\n\n{{ $json.conversa_bruta }}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {
+          "systemMessage": "Voce recebe o historico de um atendimento COMERCIAL entre um lead/cliente e o time de vendas de uma universidade (Cruzeiro do Sul Virtual). O atendimento inclui mensagens de BOT (chatbot automatico), CONSULTOR (vendedor humano) e CLIENTE (lead interessado em cursos).\n\nSua tarefa e RESUMIR o atendimento de forma objetiva, mantendo:\n- Curso de interesse do cliente\n- Se o consultor humano atendeu ou apenas o bot\n- O que o consultor orientou/ofereceu\n- Se o cliente demonstrou interesse real ou apenas consultou\n- Se houve objecoes (preco, prazo, modalidade, etc)\n- Resultado final (matriculou, desistiu, ainda pensando, sem resposta)\n\nResponda SEMPRE em JSON:\n{\n  \"resumo\": \"...\",\n  \"curso_interesse\": \"...\",\n  \"consultor_identificado\": \"nome ou null\",\n  \"acao_consultor\": \"...\",\n  \"interesse_real\": true/false,\n  \"objecoes\": \"...ou null\",\n  \"resultado\": \"matriculou|desistiu|pensando|sem_resposta|apenas_bot\",\n  \"observacoes\": \"...\"\n}"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1,
+      "position": [3200, -400],
+      "id": "summarize-comercial",
+      "name": "RESUMO COMERCIAL",
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googlePalmApi": {
+          "id": "REPLACE_GEMINI_CRED_ID",
+          "name": "Google Gemini"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "inputText": "={{ $('Montar Transcricao').item.json.conversa_bruta }}",
+        "options": {
+          "categories": "Positive, Negative, Neutro\n",
+          "systemPromptTemplate": "Voce e um analisador de sentimento. Analise o sentimento geral da conversa comercial. Classifique em: Positive (cliente engajado/interessado), Negative (cliente frustrado/desinteressado), Neutro (interacao generica/bot). Saia apenas o JSON.",
+          "enableAutoFixing": true
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.sentimentAnalysis",
+      "typeVersion": 1.1,
+      "position": [3520, -400],
+      "id": "sentiment-comercial",
+      "name": "Sentimento Comercial"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4.1-nano",
+          "mode": "list",
+          "cachedResultName": "gpt-4.1-nano"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [3488, -160],
+      "id": "llm-sentiment",
+      "name": "LLM Sentimento",
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_OPENAI_CRED_ID",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Aqui esta a conversa comercial de hoje com o lead:\n{{ $('Montar Transcricao').first().json.conversa_bruta }}",
+        "options": {
+          "systemMessage": "# TABULACAO DE QUALIDADE - ATENDIMENTO COMERCIAL\n\n## INSTRUCAO CRITICA\nVoce DEVE completar TODA a analise em UMA UNICA resposta JSON.\nNAO use ferramentas. Faca TODOS os calculos mentalmente.\n\n## IDENTIDADE\nVoce e um Analista Senior de Qualidade de Atendimento Comercial da Universidade Cruzeiro do Sul Virtual.\nSeu papel e TABULAR a interacao de vendas de forma objetiva.\n\n## DADOS RECEBIDOS\n1. JSON com resumo da conversa (do node RESUMO COMERCIAL)\n2. Conversa completa (LOG) com timestamps\n3. Sentimento da conversa\n\n## ANALISE\n\n### IDENTIFICACAO DO CONSULTOR\n- Linhas com CONSULTOR (Nome) = atendente humano\n- Se houver mais de um, use o ULTIMO\n- Se nenhum humano atendeu, use \"Nenhum (apenas bot)\"\n\n### DURACAO E TEMPOS\n- INICIO: ultima mensagem do CLIENTE antes da primeira resposta do CONSULTOR\n- FIM: ultima mensagem do log\n- tempo_primeira_resposta: tempo entre primeira msg do CLIENTE e primeira resposta do CONSULTOR\n- tempo_medio_resposta: media dos intervalos CLIENTE->CONSULTOR (ignore BOT)\n- Se nao houver CONSULTOR, use \"Nao se aplica (apenas bot)\"\n\n### AVALIACAO COMERCIAL\n- interesse: Alto/Medio/Baixo/Nenhum (baseado nas respostas do cliente)\n- status_lead: matriculou/qualificado/pensando/desistiu/sem_resposta/apenas_bot\n- objecoes: identifique objecoes mencionadas pelo cliente (preco, prazo, modalidade, etc) ou \"Nenhuma\"\n\n### NOTAS (0 a 10)\n- nota_atendimento: qualidade geral do atendimento\n- nota_abordagem: como o consultor abordou (cordialidade, proatividade, personalizacao)\n- nota_conhecimento_produto: dominio sobre cursos, precos, modalidades\n\n### NIVEIS DE CLASSIFICACAO\n- nivel_1: Categoria principal (Graduacao, Pos-graduacao, MBA, Transferencia, Segunda Graduacao, Informacao Geral)\n- nivel_2: Subcategoria (nome do curso ou tipo de demanda)\n- nivel_3: Detalhe (preco, vestibular, documentacao, prazo, modalidade, etc)\n\n## OUTPUT - JSON UNICO\n```json\n{\n  \"consultor\": \"nome ou Nenhum (apenas bot)\",\n  \"tempo_atendimento\": \"X minutos ou Nao se aplica\",\n  \"tempo_primeira_resposta\": \"X minutos ou Nao se aplica\",\n  \"tempo_medio_resposta\": \"X minutos ou Nao se aplica\",\n  \"ponto_positivo\": \"ate 100 caracteres\",\n  \"ponto_negativo\": \"ate 100 caracteres\",\n  \"feedback\": \"resumo do atendimento em 2-3 frases\",\n  \"interesse\": \"Alto/Medio/Baixo/Nenhum\",\n  \"status_lead\": \"matriculou/qualificado/pensando/desistiu/sem_resposta/apenas_bot\",\n  \"objecoes\": \"descricao ou Nenhuma\",\n  \"nota_atendimento\": 8.0,\n  \"nota_abordagem\": 7.5,\n  \"nota_conhecimento_produto\": 8.5,\n  \"nivel_1\": \"...\",\n  \"nivel_2\": \"...\",\n  \"nivel_3\": \"...\"\n}\n```\n\n## REGRAS FINAIS\n- Responda APENAS com o JSON, sem texto adicional\n- Se so teve BOT, nota_abordagem e nota_conhecimento_produto = null\n- Faca calculos mentalmente, sem ferramentas\n- Se nao ha dados suficientes para um campo, use null",
+          "maxIterations": 4
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [3840, -400],
+      "id": "tabulacao-comercial",
+      "name": "TABULACAO COMERCIAL"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "options": { "temperature": 0.2 }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [3808, -160],
+      "id": "llm-tabulacao",
+      "name": "LLM Tabulacao",
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_OPENAI_CRED_ID",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const TAB_NODE = 'TABULACAO COMERCIAL';\nconst CONV_NODE = 'Montar Transcricao';\nconst META_NODE = 'Filtrar Eventos Validos';\n\nfunction safeParse(jsonStr) {\n  if (typeof jsonStr !== 'string') return jsonStr;\n  const s = jsonStr.trim();\n  if (!s) return null;\n  try { return JSON.parse(s); } catch(e) {\n    const a = s.indexOf('{'), b = s.lastIndexOf('}');\n    if (a >= 0 && b > a) try { return JSON.parse(s.slice(a, b+1)); } catch(_) {}\n    return null;\n  }\n}\n\nfunction toNum(v) {\n  if (v === null || v === undefined || v === '') return null;\n  const n = Number(v);\n  return Number.isFinite(n) ? n : null;\n}\n\nlet tabItems = [];\ntry { tabItems = $items(TAB_NODE, 0) || []; } catch(e) { tabItems = [items[0]]; }\n\nlet convItem = {};\ntry { convItem = $items(CONV_NODE, 0)?.[0]?.json || {}; } catch(e) {}\n\nlet metaItem = {};\ntry { metaItem = $items(META_NODE, 0)?.[0]?.json || {}; } catch(e) {}\n\nconst conversa_bruta = convItem.conversa_bruta || '';\nconst lead_nome = metaItem.lead_nome || '';\nconst lead_telefone = metaItem.lead_telefone || '';\nconst lead_id = metaItem.lead_id || null;\nconst chat_ids = metaItem.chat_ids || [];\nconst chat_id = chat_ids[0] || '';\n\nconst results = tabItems.map((tItem) => {\n  const tj = tItem?.json ?? {};\n  const raw = tj.output ?? tj.text ?? tj.response ?? tj.result ?? tj.content ?? '';\n  const parsed = safeParse(raw) || safeParse(tj) || {};\n\n  return {\n    json: {\n      consultor: parsed.consultor || '',\n      lead_nome: lead_nome,\n      lead_telefone: lead_telefone,\n      lead_id: lead_id,\n      chat_id: chat_id,\n      feedback: parsed.feedback || '',\n      ponto_positivo: parsed.ponto_positivo || '',\n      ponto_negativo: parsed.ponto_negativo || '',\n      tempo_medio_resposta: parsed.tempo_medio_resposta || '',\n      tempo_primeira_resposta: parsed.tempo_primeira_resposta || '',\n      tempo_atendimento: parsed.tempo_atendimento || '',\n      nv1: parsed.nivel_1 || '',\n      nv2: parsed.nivel_2 || '',\n      nv3: parsed.nivel_3 || '',\n      nota_atendimento: toNum(parsed.nota_atendimento),\n      nota_abordagem: toNum(parsed.nota_abordagem),\n      nota_conhecimento_produto: toNum(parsed.nota_conhecimento_produto),\n      interesse: parsed.interesse || '',\n      status_lead: parsed.status_lead || '',\n      objecoes: parsed.objecoes || '',\n      conversa: conversa_bruta\n    }\n  };\n});\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4160, -400],
+      "id": "parse-tabulacao",
+      "name": "Parsear Tabulacao"
+    },
+    {
+      "parameters": {
+        "tableId": "feedback_comercial",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "consultor", "fieldValue": "={{ $json.consultor }}" },
+            { "fieldId": "lead_nome", "fieldValue": "={{ $json.lead_nome }}" },
+            { "fieldId": "lead_telefone", "fieldValue": "={{ $json.lead_telefone }}" },
+            { "fieldId": "lead_id", "fieldValue": "={{ $json.lead_id }}" },
+            { "fieldId": "chat_id", "fieldValue": "={{ $json.chat_id }}" },
+            { "fieldId": "feedback", "fieldValue": "={{ $json.feedback }}" },
+            { "fieldId": "ponto_positivo", "fieldValue": "={{ $json.ponto_positivo }}" },
+            { "fieldId": "ponto_negativo", "fieldValue": "={{ $json.ponto_negativo }}" },
+            { "fieldId": "tempo_medio_resposta", "fieldValue": "={{ $json.tempo_medio_resposta }}" },
+            { "fieldId": "tempo_primeira_resposta", "fieldValue": "={{ $json.tempo_primeira_resposta }}" },
+            { "fieldId": "tempo_atendimento", "fieldValue": "={{ $json.tempo_atendimento }}" },
+            { "fieldId": "nv1", "fieldValue": "={{ $json.nv1 }}" },
+            { "fieldId": "nv2", "fieldValue": "={{ $json.nv2 }}" },
+            { "fieldId": "nv3", "fieldValue": "={{ $json.nv3 }}" },
+            { "fieldId": "nota_atendimento", "fieldValue": "={{ $json.nota_atendimento }}" },
+            { "fieldId": "nota_abordagem", "fieldValue": "={{ $json.nota_abordagem }}" },
+            { "fieldId": "nota_conhecimento_produto", "fieldValue": "={{ $json.nota_conhecimento_produto }}" },
+            { "fieldId": "interesse", "fieldValue": "={{ $json.interesse }}" },
+            { "fieldId": "status_lead", "fieldValue": "={{ $json.status_lead }}" },
+            { "fieldId": "objecoes", "fieldValue": "={{ $json.objecoes }}" },
+            { "fieldId": "conversa", "fieldValue": "={{ $json.conversa }}" },
+            { "fieldId": "timestamp", "fieldValue": "={{ $now }}" }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [4400, -400],
+      "id": "save-feedback",
+      "name": "Salvar Feedback Comercial",
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_SUPABASE_CRED_ID",
+          "name": "Supabase Comercial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## CAPTURA E PROCESSAMENTO DE MENSAGENS\nRecebe evento atendimento_fechado do Python\ncom todas as mensagens embarcadas no payload.",
+        "height": 300,
+        "width": 700,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1000, -560],
+      "id": "note-capture",
+      "name": "Nota Captura"
+    },
+    {
+      "parameters": {
+        "content": "## PROCESSAMENTO DE MIDIA\nTranscricao de audio (Whisper), video (Gemini),\nimagem (GPT-4o) e arquivos (GPT-4.1 OCR).",
+        "height": 820,
+        "width": 2000,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-320, -880],
+      "id": "note-media",
+      "name": "Nota Midia"
+    },
+    {
+      "parameters": {
+        "content": "## ANALISE IA COMERCIAL\nResumo, Sentimento e Tabulacao\nadaptados para vendas/matriculas.",
+        "height": 500,
+        "width": 1700,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [3100, -560],
+      "id": "note-ai",
+      "name": "Nota IA"
+    }
+  ],
+  "connections": {
+    "Webhook Comercial": {
+      "main": [[{ "node": "Processar Mensagens", "type": "main", "index": 0 }]]
+    },
+    "Processar Mensagens": {
+      "main": [[{ "node": "Filtrar Eventos Validos", "type": "main", "index": 0 }]]
+    },
+    "Filtrar Eventos Validos": {
+      "main": [[
+        { "node": "Tem Midia?", "type": "main", "index": 0 },
+        { "node": "Merge Midias", "type": "main", "index": 4 }
+      ]]
+    },
+    "Tem Midia?": {
+      "main": [
+        [{ "node": "Extrair Midias", "type": "main", "index": 0 }],
+        [{ "node": "Extrair Midias", "type": "main", "index": 0 }],
+        [{ "node": "Extrair Midias", "type": "main", "index": 0 }],
+        [{ "node": "Extrair Midias", "type": "main", "index": 0 }],
+        [{ "node": "Injetar Transcricoes", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extrair Midias": {
+      "main": [[{ "node": "Agrupar por Tipo", "type": "main", "index": 0 }]]
+    },
+    "Agrupar por Tipo": {
+      "main": [[{ "node": "Split por Tipo", "type": "main", "index": 0 }]]
+    },
+    "Split por Tipo": {
+      "main": [[{ "node": "Rota por Tipo", "type": "main", "index": 0 }]]
+    },
+    "Rota por Tipo": {
+      "main": [
+        [{ "node": "URLs Audio", "type": "main", "index": 0 }],
+        [{ "node": "URLs Video", "type": "main", "index": 0 }],
+        [{ "node": "URLs Arquivo", "type": "main", "index": 0 }],
+        [{ "node": "URLs Imagem", "type": "main", "index": 0 }]
+      ]
+    },
+    "URLs Audio": {
+      "main": [[{ "node": "Download Audio", "type": "main", "index": 0 }]]
+    },
+    "Download Audio": {
+      "main": [[{ "node": "Transcrever Audio", "type": "main", "index": 0 }]]
+    },
+    "Transcrever Audio": {
+      "main": [[{ "node": "Formatar Audio", "type": "main", "index": 0 }]]
+    },
+    "Formatar Audio": {
+      "main": [[{ "node": "Merge Midias", "type": "main", "index": 0 }]]
+    },
+    "URLs Video": {
+      "main": [[{ "node": "Analisar Video", "type": "main", "index": 0 }]]
+    },
+    "Analisar Video": {
+      "main": [[{ "node": "Formatar Video", "type": "main", "index": 0 }]]
+    },
+    "Formatar Video": {
+      "main": [[{ "node": "Merge Midias", "type": "main", "index": 1 }]]
+    },
+    "URLs Arquivo": {
+      "main": [[{ "node": "Download Arquivo", "type": "main", "index": 0 }]]
+    },
+    "Download Arquivo": {
+      "main": [[{ "node": "Upload OpenAI", "type": "main", "index": 0 }]]
+    },
+    "Upload OpenAI": {
+      "main": [[{ "node": "OCR Arquivo", "type": "main", "index": 0 }]]
+    },
+    "OCR Arquivo": {
+      "main": [[{ "node": "Formatar Arquivo", "type": "main", "index": 0 }]]
+    },
+    "Formatar Arquivo": {
+      "main": [[{ "node": "Merge Midias", "type": "main", "index": 2 }]]
+    },
+    "URLs Imagem": {
+      "main": [[{ "node": "Download Imagem", "type": "main", "index": 0 }]]
+    },
+    "Download Imagem": {
+      "main": [[{ "node": "Analisar Imagem", "type": "main", "index": 0 }]]
+    },
+    "Analisar Imagem": {
+      "main": [[{ "node": "Formatar Imagem", "type": "main", "index": 0 }]]
+    },
+    "Formatar Imagem": {
+      "main": [[{ "node": "Merge Midias", "type": "main", "index": 3 }]]
+    },
+    "Merge Midias": {
+      "main": [[{ "node": "Injetar Transcricoes", "type": "main", "index": 0 }]]
+    },
+    "Injetar Transcricoes": {
+      "main": [[{ "node": "Achatar Mensagens", "type": "main", "index": 0 }]]
+    },
+    "Achatar Mensagens": {
+      "main": [[{ "node": "Montar Transcricao", "type": "main", "index": 0 }]]
+    },
+    "Montar Transcricao": {
+      "main": [[{ "node": "RESUMO COMERCIAL", "type": "main", "index": 0 }]]
+    },
+    "RESUMO COMERCIAL": {
+      "main": [[{ "node": "Sentimento Comercial", "type": "main", "index": 0 }]]
+    },
+    "Sentimento Comercial": {
+      "main": [
+        [{ "node": "TABULACAO COMERCIAL", "type": "main", "index": 0 }],
+        [{ "node": "TABULACAO COMERCIAL", "type": "main", "index": 0 }],
+        [{ "node": "TABULACAO COMERCIAL", "type": "main", "index": 0 }]
+      ]
+    },
+    "LLM Sentimento": {
+      "ai_languageModel": [[{ "node": "Sentimento Comercial", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "LLM Tabulacao": {
+      "ai_languageModel": [[{ "node": "TABULACAO COMERCIAL", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "TABULACAO COMERCIAL": {
+      "main": [[{ "node": "Parsear Tabulacao", "type": "main", "index": 0 }]]
+    },
+    "Parsear Tabulacao": {
+      "main": [[{ "node": "Salvar Feedback Comercial", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

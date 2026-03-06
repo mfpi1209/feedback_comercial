@@ -19,6 +19,8 @@ from app.database import async_session
 from app.models.atendimento import Atendimento
 from app.models.message import KommoMessage
 from app.models.monitored_chat import MonitoredChat
+from app.services.n8n_dispatcher import get_dispatcher
+from app.services.supabase_messages import enrich_atendimento_messages
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,10 @@ async def detect_atendimentos() -> tuple[int, int, int]:
     created = 0
     updated = 0
     closed = 0
+
+    backfilled = await _backfill_contact_ids()
+    if backfilled:
+        logger.info("Backfill: %d mensagens atualizadas com contact_id", backfilled)
 
     async with async_session() as db:
         contact_ids_q = await db.execute(
@@ -118,10 +124,12 @@ async def _process_contact(contact_id: int) -> tuple[int, int]:
 
             if matched:
                 changed = False
+                old_count = matched.message_count
+                new_msgs = session["count"] > old_count
                 if matched.session_end != session["end"]:
                     matched.session_end = session["end"]
                     changed = True
-                if matched.message_count != session["count"]:
+                if new_msgs:
                     matched.message_count = session["count"]
                     changed = True
                 if matched.chat_ids_json != chat_ids_json:
@@ -135,6 +143,13 @@ async def _process_contact(contact_id: int) -> tuple[int, int]:
                     changed = True
                 if lead_telefone and not matched.lead_telefone:
                     matched.lead_telefone = lead_telefone
+                    changed = True
+                if new_msgs and matched.status == "analisado":
+                    matched.status = "aberto"
+                    logger.info(
+                        "Atendimento #%d reaberto: %d→%d msgs",
+                        matched.id, old_count, session["count"],
+                    )
                     changed = True
                 if changed:
                     matched.updated_at = datetime.now(timezone.utc)
@@ -235,17 +250,70 @@ def _extract_lead_info(contact_id: int, messages: list) -> tuple[None, str | Non
 async def _close_stale_atendimentos() -> int:
     """Marca atendimentos como 'fechado' se nao ha mensagens novas ha CLOSE_AFTER_HOURS."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=CLOSE_AFTER_HOURS)
+
     async with async_session() as db:
-        result = await db.execute(
-            update(Atendimento)
-            .where(
+        stale_q = await db.execute(
+            select(Atendimento).where(
                 Atendimento.status == "aberto",
                 Atendimento.session_end < cutoff,
             )
-            .values(status="fechado", updated_at=datetime.now(timezone.utc))
         )
+        stale = list(stale_q.scalars().all())
+
+        if not stale:
+            return 0
+
+        for atend in stale:
+            atend.status = "fechado"
+            atend.updated_at = datetime.now(timezone.utc)
+
         await db.commit()
-        return result.rowcount or 0
+
+    for atend in stale:
+        asyncio.create_task(_on_atendimento_closed(atend))
+
+    return len(stale)
+
+
+async def _on_atendimento_closed(atend: Atendimento) -> None:
+    """Enriquece mensagens no Supabase e notifica n8n ao fechar um atendimento."""
+    try:
+        enriched = await enrich_atendimento_messages(
+            atendimento_id=atend.id,
+            contact_id=atend.contact_id,
+            session_start=atend.session_start,
+            session_end=atend.session_end,
+        )
+        if enriched:
+            logger.info(
+                "Atendimento #%d: %d mensagens enriquecidas no Supabase",
+                atend.id, enriched,
+            )
+    except Exception:
+        logger.exception("Erro ao enriquecer atendimento #%d no Supabase", atend.id)
+
+    try:
+        chat_ids = json.loads(atend.chat_ids_json) if atend.chat_ids_json else []
+    except (json.JSONDecodeError, TypeError):
+        chat_ids = []
+
+    messages_payload = await _fetch_atendimento_messages(
+        atend.contact_id, atend.session_start, atend.session_end,
+    )
+
+    get_dispatcher().enqueue({
+        "event": "atendimento_fechado",
+        "atendimento_id": atend.id,
+        "contact_id": atend.contact_id,
+        "lead_id": atend.lead_id,
+        "lead_nome": atend.lead_nome,
+        "lead_telefone": atend.lead_telefone,
+        "session_start": atend.session_start.isoformat() if atend.session_start else None,
+        "session_end": atend.session_end.isoformat() if atend.session_end else None,
+        "message_count": atend.message_count,
+        "chat_ids": chat_ids,
+        "messages": messages_payload,
+    })
 
 
 async def get_lead_id_for_contact(contact_id: int) -> int | None:
@@ -261,3 +329,96 @@ async def get_lead_id_for_contact(contact_id: int) -> int | None:
             .limit(1)
         )
         return result.scalar()
+
+
+async def _backfill_contact_ids() -> int:
+    """
+    Propaga contact_id de monitored_chats para kommo_messages
+    onde ainda estiver NULL/0.
+    """
+    total = 0
+    async with async_session() as db:
+        chat_map_q = await db.execute(
+            select(MonitoredChat.chat_id, MonitoredChat.contact_id)
+            .where(MonitoredChat.contact_id.isnot(None), MonitoredChat.contact_id != 0)
+        )
+        chat_map = {row.chat_id: row.contact_id for row in chat_map_q.all()}
+
+        if not chat_map:
+            return 0
+
+        for chat_id, contact_id in chat_map.items():
+            result = await db.execute(
+                update(KommoMessage)
+                .where(
+                    KommoMessage.chat_id == chat_id,
+                    (KommoMessage.contact_id.is_(None)) | (KommoMessage.contact_id == 0),
+                )
+                .values(contact_id=contact_id)
+            )
+            total += result.rowcount or 0
+
+        if total:
+            await db.commit()
+
+    return total
+
+
+async def _fetch_atendimento_messages(
+    contact_id: int,
+    session_start: datetime,
+    session_end: datetime,
+) -> list[dict]:
+    """Busca todas as mensagens de um atendimento no SQLite para enviar ao n8n."""
+    async with async_session() as db:
+        q = await db.execute(
+            select(
+                KommoMessage.message_uid,
+                KommoMessage.chat_id,
+                KommoMessage.sender_name,
+                KommoMessage.sender_phone,
+                KommoMessage.sender_type,
+                KommoMessage.message_text,
+                KommoMessage.message_type,
+                KommoMessage.media_url,
+                KommoMessage.sent_at,
+                KommoMessage.origin,
+                KommoMessage.lead_id,
+            )
+            .where(
+                KommoMessage.contact_id == contact_id,
+                KommoMessage.sent_at >= session_start,
+                KommoMessage.sent_at <= session_end,
+            )
+            .order_by(KommoMessage.sent_at.asc())
+        )
+        rows = q.all()
+
+    result = []
+    for r in rows:
+        if r.sender_type == "contact":
+            direction = "inbound"
+            role = "CLIENTE"
+        elif r.sender_type == "user":
+            direction = "outbound"
+            role = "CONSULTOR"
+        else:
+            direction = "outbound"
+            role = "BOT"
+
+        result.append({
+            "message_uid": r.message_uid,
+            "chat_id": r.chat_id,
+            "sender_name": r.sender_name,
+            "sender_type": r.sender_type,
+            "role": role,
+            "direction": direction,
+            "message_text": r.message_text or "",
+            "message_type": r.message_type or "text",
+            "media_url": r.media_url,
+            "sent_at": r.sent_at.isoformat() if r.sent_at else None,
+            "origin": r.origin,
+            "has_media": bool(r.media_url),
+        })
+
+    return result

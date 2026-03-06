@@ -1,0 +1,414 @@
+{
+  "name": "feedback_comercial_v2",
+  "nodes": [
+    {
+      "parameters": { "httpMethod": "POST", "path": "feedback_comercial", "options": { "rawBody": false } },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-200, 400],
+      "id": "wh-01",
+      "name": "Webhook Comercial",
+      "webhookId": "feedback_comercial"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.item.json;\nconst body = input.body || input;\nconst event = body.event || '';\n\nlet event_type = 'ignorar';\nif (event === 'atendimento_fechado') {\n  event_type = 'atendimento_fechado';\n} else if (event === 'new_message') {\n  event_type = 'new_message';\n}\n\nconst msgType = (body.message_type || 'text').toUpperCase();\nconst hasMedia = ['VOICE','VIDEO','FILE','PICTURE'].includes(msgType) && !!body.media_url;\n\n// Garante defaults para campos NOT NULL do Supabase\nconst senderType = body.sender_type || 'unknown';\nlet direction = body.direction;\nif (!direction) {\n  direction = senderType === 'contact' ? 'inbound' : 'outbound';\n}\n\nreturn [{\n  json: {\n    ...body,\n    direction: direction,\n    sender_type: senderType,\n    sender_name: body.sender_name || '',\n    chat_id: body.chat_id || '',\n    message_uid: body.message_uid || `auto-${Date.now()}`,\n    message_text: body.message_text || '',\n    message_type: body.message_type || 'text',\n    sent_at: body.sent_at || new Date().toISOString(),\n    _event_type: event_type,\n    _has_media: hasMedia,\n    _media_type: hasMedia ? msgType : null\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [50, 400],
+      "id": "class-01",
+      "name": "Classificar Evento"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+                "conditions": [{ "id": "r-new", "leftValue": "={{ $json._event_type }}", "rightValue": "new_message", "operator": { "type": "string", "operation": "equals" } }],
+                "combinator": "and"
+              },
+              "renameOutput": true, "outputKey": "new_message"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+                "conditions": [{ "id": "r-atend", "leftValue": "={{ $json._event_type }}", "rightValue": "atendimento_fechado", "operator": { "type": "string", "operation": "equals" } }],
+                "combinator": "and"
+              },
+              "renameOutput": true, "outputKey": "atendimento"
+            }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.3,
+      "position": [300, 400],
+      "id": "rota-01",
+      "name": "Rota Principal"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+          "conditions": [{ "id": "ck-media", "leftValue": "={{ $json._has_media }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equals" } }],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [550, 200],
+      "id": "if-media",
+      "name": "Tem Midia?"
+    },
+    {
+      "parameters": {
+        "tableId": "mensagens_atendimento_comercial",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "message_uid", "fieldValue": "={{ $('Classificar Evento').first().json.message_uid }}" },
+            { "fieldId": "contact_id", "fieldValue": "={{ $('Classificar Evento').first().json.contact_id || null }}" },
+            { "fieldId": "lead_id", "fieldValue": "={{ $('Classificar Evento').first().json.lead_id || null }}" },
+            { "fieldId": "lead_nome", "fieldValue": "={{ $('Classificar Evento').first().json.lead_nome || '' }}" },
+            { "fieldId": "chat_id", "fieldValue": "={{ $('Classificar Evento').first().json.chat_id }}" },
+            { "fieldId": "direction", "fieldValue": "={{ $('Classificar Evento').first().json.direction }}" },
+            { "fieldId": "sender_type", "fieldValue": "={{ $('Classificar Evento').first().json.sender_type }}" },
+            { "fieldId": "sender_name", "fieldValue": "={{ $('Classificar Evento').first().json.sender_name || '' }}" },
+            { "fieldId": "message_text", "fieldValue": "={{ $('Classificar Evento').first().json.message_text || '' }}" },
+            { "fieldId": "message_type", "fieldValue": "={{ $('Classificar Evento').first().json.message_type || 'text' }}" },
+            { "fieldId": "media_url", "fieldValue": "={{ $('Classificar Evento').first().json.media_url || null }}" },
+            { "fieldId": "sent_at", "fieldValue": "={{ $('Classificar Evento').first().json.sent_at }}" },
+            { "fieldId": "consultor_responsavel", "fieldValue": "={{ $('Classificar Evento').first().json.consultor_responsavel || null }}" },
+            { "fieldId": "origin", "fieldValue": "={{ $('Classificar Evento').first().json.origin || null }}" }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [850, -50],
+      "id": "save-txt",
+      "name": "Salvar Msg Texto",
+      "credentials": { "supabaseApi": { "id": "a59N4utmvOWppCz4", "name": "Supabase account" } }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }, "conditions": [{ "id": "m-voice", "leftValue": "={{ $json._media_type }}", "rightValue": "VOICE", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "renameOutput": true, "outputKey": "VOICE" },
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }, "conditions": [{ "id": "m-video", "leftValue": "={{ $json._media_type }}", "rightValue": "VIDEO", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "renameOutput": true, "outputKey": "VIDEO" },
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }, "conditions": [{ "id": "m-file", "leftValue": "={{ $json._media_type }}", "rightValue": "FILE", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "renameOutput": true, "outputKey": "FILE" },
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }, "conditions": [{ "id": "m-pic", "leftValue": "={{ $json._media_type }}", "rightValue": "PICTURE", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "renameOutput": true, "outputKey": "PICTURE" }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.3,
+      "position": [850, 300],
+      "id": "tipo-midia",
+      "name": "Tipo Midia"
+    },
+    {
+      "parameters": { "url": "={{ $json.media_url }}", "options": {} },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1150, 50],
+      "id": "dl-audio",
+      "name": "DL Audio"
+    },
+    {
+      "parameters": { "resource": "audio", "operation": "transcribe", "options": {} },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2,
+      "position": [1400, 50],
+      "id": "whisper-01",
+      "name": "Whisper",
+      "retryOnFail": true, "maxTries": 3, "waitBetweenTries": 3000,
+      "credentials": { "openAiApi": { "id": "Z9TNe1XXwqwIPGol", "name": "OpenAi account" } }
+    },
+    {
+      "parameters": { "assignments": { "assignments": [
+        { "id": "a1", "name": "text", "value": "=Audio: {{ $json.text || 'transcricao indisponivel' }}", "type": "string" }
+      ] }, "options": {} },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1650, 50],
+      "id": "fmt-audio",
+      "name": "Fmt Audio"
+    },
+    {
+      "parameters": {
+        "resource": "video", "operation": "analyze",
+        "modelId": { "__rl": true, "value": "models/gemini-2.5-flash", "mode": "list", "cachedResultName": "models/gemini-2.5-flash" },
+        "text": "Descreva sobre o que se trata o video de forma resumida.",
+        "videoUrls": "={{ $json.media_url }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1,
+      "position": [1150, 250],
+      "id": "gemini-video",
+      "name": "Gemini Video",
+      "retryOnFail": true, "maxTries": 3, "waitBetweenTries": 5000,
+      "credentials": { "googlePalmApi": { "id": "1Q36QR1lRlPPPVft", "name": "Google Gemini(PaLM) Api account" } }
+    },
+    {
+      "parameters": { "assignments": { "assignments": [
+        { "id": "v1", "name": "text", "value": "=Video: {{ $json.content.parts[0].text || 'descricao indisponivel' }}", "type": "string" }
+      ] }, "options": {} },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1400, 250],
+      "id": "fmt-video",
+      "name": "Fmt Video"
+    },
+    {
+      "parameters": { "url": "={{ $json.media_url }}", "options": {} },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1150, 450],
+      "id": "dl-arquivo",
+      "name": "DL Arquivo"
+    },
+    {
+      "parameters": {
+        "method": "POST", "url": "https://api.openai.com/v1/files",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true, "contentType": "multipart-form-data",
+        "bodyParameters": { "parameters": [{ "name": "purpose", "value": "assistants" }, { "parameterType": "formBinaryData", "name": "file", "inputDataFieldName": "data" }] },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1400, 450],
+      "id": "upload-file",
+      "name": "Upload OpenAI",
+      "onError": "continueErrorOutput",
+      "credentials": { "openAiApi": { "id": "Z9TNe1XXwqwIPGol", "name": "OpenAi account" } }
+    },
+    {
+      "parameters": {
+        "method": "POST", "url": "https://api.openai.com/v1/responses",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4.1\",\n  \"input\": [\n    { \"role\": \"user\", \"content\": [\n      { \"type\": \"input_file\", \"file_id\": \"{{ $json.id }}\" },\n      { \"type\": \"input_text\", \"text\": \"Somente transcreva o que esta no arquivo, nao fale mais nada\" }\n    ] }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1650, 450],
+      "id": "ocr-file",
+      "name": "OCR Arquivo",
+      "onError": "continueErrorOutput",
+      "credentials": { "openAiApi": { "id": "Z9TNe1XXwqwIPGol", "name": "OpenAi account" } }
+    },
+    {
+      "parameters": { "assignments": { "assignments": [
+        { "id": "f1", "name": "text", "value": "=Arquivo: {{ $json.output ? $json.output[0].content[0].text : 'conteudo indisponivel' }}", "type": "string" }
+      ] }, "options": {} },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1900, 450],
+      "id": "fmt-arquivo",
+      "name": "Fmt Arquivo"
+    },
+    {
+      "parameters": { "url": "={{ $json.media_url }}", "options": {} },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1150, 650],
+      "id": "dl-imagem",
+      "name": "DL Imagem"
+    },
+    {
+      "parameters": {
+        "resource": "image", "operation": "analyze",
+        "modelId": { "__rl": true, "value": "gpt-4o", "mode": "list", "cachedResultName": "GPT-4O" },
+        "text": "Resuma o que esta na imagem de forma objetiva",
+        "inputType": "base64", "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2,
+      "position": [1400, 650],
+      "id": "vision-img",
+      "name": "Vision Imagem",
+      "credentials": { "openAiApi": { "id": "Z9TNe1XXwqwIPGol", "name": "OpenAi account" } }
+    },
+    {
+      "parameters": { "assignments": { "assignments": [
+        { "id": "i1", "name": "text", "value": "=Imagem: {{ $json['0'] ? $json['0'].content[0].text : 'descricao indisponivel' }}", "type": "string" }
+      ] }, "options": {} },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1650, 650],
+      "id": "fmt-imagem",
+      "name": "Fmt Imagem"
+    },
+    {
+      "parameters": {
+        "tableId": "mensagens_atendimento_comercial",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "message_uid", "fieldValue": "={{ $('Classificar Evento').first().json.message_uid }}" },
+            { "fieldId": "contact_id", "fieldValue": "={{ $('Classificar Evento').first().json.contact_id || null }}" },
+            { "fieldId": "lead_id", "fieldValue": "={{ $('Classificar Evento').first().json.lead_id || null }}" },
+            { "fieldId": "lead_nome", "fieldValue": "={{ $('Classificar Evento').first().json.lead_nome || '' }}" },
+            { "fieldId": "chat_id", "fieldValue": "={{ $('Classificar Evento').first().json.chat_id }}" },
+            { "fieldId": "direction", "fieldValue": "={{ $('Classificar Evento').first().json.direction }}" },
+            { "fieldId": "sender_type", "fieldValue": "={{ $('Classificar Evento').first().json.sender_type }}" },
+            { "fieldId": "sender_name", "fieldValue": "={{ $('Classificar Evento').first().json.sender_name || '' }}" },
+            { "fieldId": "message_text", "fieldValue": "={{ $json.text || '' }}" },
+            { "fieldId": "message_type", "fieldValue": "={{ $('Classificar Evento').first().json.message_type || 'text' }}" },
+            { "fieldId": "media_url", "fieldValue": "={{ $('Classificar Evento').first().json.media_url || null }}" },
+            { "fieldId": "sent_at", "fieldValue": "={{ $('Classificar Evento').first().json.sent_at }}" },
+            { "fieldId": "consultor_responsavel", "fieldValue": "={{ $('Classificar Evento').first().json.consultor_responsavel || null }}" },
+            { "fieldId": "origin", "fieldValue": "={{ $('Classificar Evento').first().json.origin || null }}" }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2150, 300],
+      "id": "save-media",
+      "name": "Salvar Msg Midia",
+      "credentials": { "supabaseApi": { "id": "a59N4utmvOWppCz4", "name": "Supabase account" } }
+    },
+    {
+      "parameters": {
+        "url": "http://kommo-dispatcher:8000/api/kommo/token/ensure-valid",
+        "options": { "timeout": 120000 }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [550, 900],
+      "id": "token-check",
+      "name": "Garantir Token",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "mensagens_atendimento_comercial",
+        "returnAll": true,
+        "filterType": "string",
+        "filterString": "=contact_id=eq.{{ $json.contact_id }}&sent_at=gte.{{ $json.session_start }}&sent_at=lte.{{ $json.session_end }}&order=sent_at.asc"
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [550, 700],
+      "id": "buscar-msgs",
+      "name": "Buscar Msgs Supabase",
+      "credentials": { "supabaseApi": { "id": "a59N4utmvOWppCz4", "name": "Supabase account" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nif (!items.length) return [{ json: { conversa_bruta: '' } }];\n\nconst linhas = items.map(item => {\n  const j = item.json;\n  const role = (j.sender_type || 'bot').toLowerCase();\n  const name = (j.sender_name || '').trim();\n  const msg = j.message_text || '';\n  const hora = j.sent_at || '';\n  const tipo = (j.message_type || 'text').toLowerCase();\n\n  let papel;\n  if (role === 'contact') papel = `CLIENTE (${name})`;\n  else if (role === 'user') papel = `CONSULTOR (${name})`;\n  else papel = `BOT (${name})`;\n\n  if (!msg && ['voice','video','file','picture'].includes(tipo)) {\n    return `[${hora}] ${papel}: [${tipo.toUpperCase()} nao transcrito]`;\n  }\n  return `[${hora}] ${papel}: ${msg}`;\n});\n\nreturn [{ json: { conversa_bruta: linhas.join('\\n') } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 700],
+      "id": "montar-01",
+      "name": "Montar Transcricao"
+    },
+    {
+      "parameters": {
+        "jsCode": "let meta = {};\ntry { meta = $('Classificar Evento').first().json; } catch(e) {}\n\nconst conversa = $json.conversa_bruta || '';\n\nlet consultor = '';\nconst items = $('Buscar Msgs Supabase').all();\nfor (const it of items) {\n  if ((it.json.sender_type || '').toLowerCase() === 'user' && it.json.sender_name) {\n    consultor = it.json.sender_name;\n  }\n}\n\nreturn [{\n  json: {\n    consultor: consultor || '',\n    lead_nome: meta.lead_nome || '',\n    lead_telefone: meta.lead_telefone || '',\n    lead_id: meta.lead_id || null,\n    chat_id: (meta.chat_ids || [])[0] || '',\n    conversa: conversa,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 700],
+      "id": "prep-log",
+      "name": "Preparar Log"
+    },
+    {
+      "parameters": {
+        "tableId": "feedback_comercial",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "consultor", "fieldValue": "={{ $json.consultor }}" },
+            { "fieldId": "lead_nome", "fieldValue": "={{ $json.lead_nome }}" },
+            { "fieldId": "lead_telefone", "fieldValue": "={{ $json.lead_telefone }}" },
+            { "fieldId": "lead_id", "fieldValue": "={{ $json.lead_id }}" },
+            { "fieldId": "chat_id", "fieldValue": "={{ $json.chat_id }}" },
+            { "fieldId": "conversa", "fieldValue": "={{ $json.conversa }}" },
+            { "fieldId": "timestamp", "fieldValue": "={{ $now }}" }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1350, 700],
+      "id": "save-transcript",
+      "name": "Salvar Transcricao",
+      "credentials": { "supabaseApi": { "id": "a59N4utmvOWppCz4", "name": "Supabase account" } }
+    },
+    {
+      "parameters": { "content": "## PATH A: NOVA MENSAGEM\nRecebe cada mensagem do Python.\n- Texto: salva direto no Supabase\n- Midia: transcreve/analisa antes de salvar\n\nTudo passa pelo n8n — controle centralizado.", "height": 830, "width": 1700, "color": 4 },
+      "type": "n8n-nodes-base.stickyNote", "typeVersion": 1,
+      "position": [480, -120], "id": "note-a", "name": "Nota Path A"
+    },
+    {
+      "parameters": { "content": "## PATH B: ATENDIMENTO FECHADO\nQuando conversa fica 2h inativa:\n1. Busca msgs enriquecidas do Supabase\n2. Monta transcricao consolidada\n3. Salva em feedback_comercial\n\nMidias ja transcritas pelo Path A.", "height": 360, "width": 960, "color": 3 },
+      "type": "n8n-nodes-base.stickyNote", "typeVersion": 1,
+      "position": [480, 620], "id": "note-b", "name": "Nota Path B"
+    },
+    {
+      "parameters": { "content": "## TOKEN CHECK\nVerifica e renova o token do Kommo\nvia Playwright se necessario.\n\nURL: http://kommo-dispatcher:8000\n(funciona se n8n e dispatcher estao\nna mesma rede Docker/EasyPanel)", "height": 200, "width": 340, "color": 7 },
+      "type": "n8n-nodes-base.stickyNote", "typeVersion": 1,
+      "position": [480, 860], "id": "note-token", "name": "Nota Token"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Comercial": { "main": [[{ "node": "Classificar Evento", "type": "main", "index": 0 }]] },
+    "Classificar Evento": { "main": [[{ "node": "Rota Principal", "type": "main", "index": 0 }]] },
+    "Rota Principal": {
+      "main": [
+        [{ "node": "Tem Midia?", "type": "main", "index": 0 }],
+        [{ "node": "Buscar Msgs Supabase", "type": "main", "index": 0 }, { "node": "Garantir Token", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Tem Midia?": {
+      "main": [
+        [{ "node": "Tipo Midia", "type": "main", "index": 0 }],
+        [{ "node": "Salvar Msg Texto", "type": "main", "index": 0 }]
+      ]
+    },
+    "Tipo Midia": {
+      "main": [
+        [{ "node": "DL Audio", "type": "main", "index": 0 }],
+        [{ "node": "Gemini Video", "type": "main", "index": 0 }],
+        [{ "node": "DL Arquivo", "type": "main", "index": 0 }],
+        [{ "node": "DL Imagem", "type": "main", "index": 0 }]
+      ]
+    },
+    "DL Audio": { "main": [[{ "node": "Whisper", "type": "main", "index": 0 }]] },
+    "Whisper": { "main": [[{ "node": "Fmt Audio", "type": "main", "index": 0 }]] },
+    "Fmt Audio": { "main": [[{ "node": "Salvar Msg Midia", "type": "main", "index": 0 }]] },
+    "Gemini Video": { "main": [[{ "node": "Fmt Video", "type": "main", "index": 0 }]] },
+    "Fmt Video": { "main": [[{ "node": "Salvar Msg Midia", "type": "main", "index": 0 }]] },
+    "DL Arquivo": { "main": [[{ "node": "Upload OpenAI", "type": "main", "index": 0 }]] },
+    "Upload OpenAI": { "main": [[{ "node": "OCR Arquivo", "type": "main", "index": 0 }]] },
+    "OCR Arquivo": { "main": [[{ "node": "Fmt Arquivo", "type": "main", "index": 0 }]] },
+    "Fmt Arquivo": { "main": [[{ "node": "Salvar Msg Midia", "type": "main", "index": 0 }]] },
+    "DL Imagem": { "main": [[{ "node": "Vision Imagem", "type": "main", "index": 0 }]] },
+    "Vision Imagem": { "main": [[{ "node": "Fmt Imagem", "type": "main", "index": 0 }]] },
+    "Fmt Imagem": { "main": [[{ "node": "Salvar Msg Midia", "type": "main", "index": 0 }]] },
+    "Buscar Msgs Supabase": { "main": [[{ "node": "Montar Transcricao", "type": "main", "index": 0 }]] },
+    "Montar Transcricao": { "main": [[{ "node": "Preparar Log", "type": "main", "index": 0 }]] },
+    "Preparar Log": { "main": [[{ "node": "Salvar Transcricao", "type": "main", "index": 0 }]] }
+  },
+  "active": true,
+  "settings": { "executionOrder": "v1", "binaryMode": "separate", "availableInMCP": false },
+  "versionId": "v2-central-n8n",
+  "meta": { "templateCredsSetupCompleted": true, "instanceId": "227cdb0212675df6577d5376009d037e6e20901652186996baaf8300dececd0a" },
+  "id": "iAetJ148ZAS0YUQZ",
+  "tags": []
+}

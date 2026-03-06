@@ -15,6 +15,11 @@ class Settings(BaseSettings):
 
     kommo_webhook_secret: str = ""
 
+    # Login Kommo — para renovacao automatica do amojo token via Playwright
+    kommo_login_email: str = ""
+    kommo_login_password: str = ""
+    token_renewal_interval_hours: int = 20
+
     # IA — processamento de mídia e análise
     openai_api_key: str = ""
     google_gemini_api_key: str = ""
@@ -22,6 +27,9 @@ class Settings(BaseSettings):
     # Supabase — gravação de feedback
     supabase_url: str = ""
     supabase_key: str = ""
+
+    # n8n — webhook para processamento externo
+    n8n_webhook_url: str = ""
 
     sync_batch_size: int = 50
     sync_interval_seconds: int = 300

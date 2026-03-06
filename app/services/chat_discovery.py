@@ -49,7 +49,7 @@ async def discover_and_register_chats() -> int:
     de chats já existentes que ainda não tinham esse dado.
     Retorna qtd de novos chats registrados.
     """
-    talks = await list_all_talks(limit=500)
+    talks = await list_all_talks(limit=2000)
     if not talks:
         return 0
 

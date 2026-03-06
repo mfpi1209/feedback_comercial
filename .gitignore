@@ -28,9 +28,10 @@ env/
 .DS_Store
 Thumbs.db
 
-# Test scripts
+# Test / backup scripts
 test_*.py
 check_*.py
+*.bak
 
 # Logs
 *.log

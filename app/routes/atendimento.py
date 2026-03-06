@@ -10,6 +10,8 @@ from sqlalchemy import select, func
 
 from app.database import async_session
 from app.models.atendimento import Atendimento
+from app.services.atendimento_detector import _fetch_atendimento_messages
+from app.services.n8n_webhook import send_to_n8n
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +99,54 @@ async def get_atendimento(atendimento_id: int):
         raise HTTPException(status_code=404, detail="Atendimento não encontrado")
 
     return _format_atendimento(atend)
+
+
+@router.post("/{atendimento_id}/send-n8n")
+async def send_atendimento_to_n8n(atendimento_id: int):
+    """Dispara manualmente o payload de um atendimento para o webhook n8n."""
+    async with async_session() as db:
+        atend_q = await db.execute(
+            select(Atendimento).where(Atendimento.id == atendimento_id)
+        )
+        atend = atend_q.scalar_one_or_none()
+
+    if not atend:
+        raise HTTPException(status_code=404, detail="Atendimento nao encontrado")
+
+    try:
+        chat_ids = json.loads(atend.chat_ids_json) if atend.chat_ids_json else []
+    except (json.JSONDecodeError, TypeError):
+        chat_ids = []
+
+    messages = await _fetch_atendimento_messages(
+        atend.contact_id, atend.session_start, atend.session_end,
+    )
+
+    payload = {
+        "event": "atendimento_fechado",
+        "atendimento_id": atend.id,
+        "contact_id": atend.contact_id,
+        "lead_id": atend.lead_id,
+        "lead_nome": atend.lead_nome,
+        "lead_telefone": atend.lead_telefone,
+        "session_start": atend.session_start.isoformat() if atend.session_start else None,
+        "session_end": atend.session_end.isoformat() if atend.session_end else None,
+        "message_count": atend.message_count,
+        "chat_ids": chat_ids,
+        "messages": messages,
+    }
+
+    ok = await send_to_n8n(payload)
+    return {
+        "sent": ok,
+        "atendimento_id": atend.id,
+        "message_count": len(messages),
+        "payload_preview": {
+            "event": payload["event"],
+            "lead_nome": payload["lead_nome"],
+            "message_count": len(messages),
+        },
+    }
 
 
 def _format_atendimento(a: Atendimento) -> dict:

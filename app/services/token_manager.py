@@ -94,6 +94,12 @@ async def get_valid_token() -> str:
     return _state.token
 
 
+async def force_refresh() -> bool:
+    """Força tentativa de refresh, independente do estado de expiração."""
+    _state.expired_at = 0
+    return await _try_refresh()
+
+
 async def _try_refresh() -> bool:
     """
     Tenta renovar o token usando o refresh_token.
