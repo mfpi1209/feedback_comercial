@@ -121,10 +121,41 @@ async def _poll_chat_safe(chat) -> int:
     """Poll com semaforo para limitar concorrencia."""
     async with _semaphore:
         try:
+            if chat.last_message_uid is None:
+                await _silent_sync(chat)
+                return 0
             return await _poll_chat(chat)
         except Exception:
             logger.exception("Erro ao monitorar chat %s", chat.chat_id)
             return 0
+
+
+async def _silent_sync(chat: MonitoredChat) -> None:
+    """
+    Sync silencioso para chats nunca pollados: marca o ponteiro
+    na mensagem mais recente SEM despachar historico para o n8n.
+    A partir do proximo ciclo, apenas mensagens novas serao despachadas.
+    """
+    messages = await fetch_chat_history(chat.chat_id, limit=1, offset=0)
+    if not messages or not messages[0].uid:
+        return
+
+    latest = messages[0]
+    async with async_session() as db:
+        await db.execute(
+            update(MonitoredChat)
+            .where(MonitoredChat.id == chat.id)
+            .values(
+                last_message_uid=latest.uid,
+                last_message_at=latest.sent_at,
+            )
+        )
+        await db.commit()
+
+    logger.info(
+        "Sync silencioso: %s (%s) — ponteiro em %s",
+        chat.chat_id[:12], chat.label or "sem label", latest.uid[:12],
+    )
 
 
 async def _get_prioritized_chats(

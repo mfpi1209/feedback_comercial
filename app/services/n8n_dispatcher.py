@@ -22,9 +22,10 @@ _RETRY_DELAY = 3.0
 
 class N8nDispatcher:
 
-    def __init__(self, max_workers: int = 2):
+    def __init__(self, max_workers: int = 2, send_interval: float = 0.5):
         self._queue: asyncio.Queue[dict] = asyncio.Queue()
         self._max_workers = max_workers
+        self._send_interval = send_interval
         self._sent = 0
         self._failed = 0
         self._total_enqueued = 0
@@ -67,6 +68,8 @@ class N8nDispatcher:
                 payload = await asyncio.wait_for(self._queue.get(), timeout=5.0)
             except asyncio.TimeoutError:
                 continue
+
+            await asyncio.sleep(self._send_interval)
 
             event = payload.get("event", "?")
             uid = (payload.get("message_uid") or "")[:16]
