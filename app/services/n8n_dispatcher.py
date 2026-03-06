@@ -22,7 +22,7 @@ _RETRY_DELAY = 3.0
 
 class N8nDispatcher:
 
-    def __init__(self, max_workers: int = 2, send_interval: float = 0.5):
+    def __init__(self, max_workers: int = 3, send_interval: float = 0.2):
         self._queue: asyncio.Queue[dict] = asyncio.Queue()
         self._max_workers = max_workers
         self._send_interval = send_interval

@@ -51,8 +51,8 @@ def _dispatch_message(payload: dict) -> None:
     get_dispatcher().enqueue({"event": "new_message", **payload})
 
 
-MIN_CYCLE_SECONDS = 5
-CONCURRENT_POLLS = 3
+MIN_CYCLE_SECONDS = 3
+CONCURRENT_POLLS = 5
 
 TIER_HOT_HOURS = 2
 TIER_WARM_HOURS = 24
