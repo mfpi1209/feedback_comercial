@@ -3,7 +3,7 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql+asyncpg://user:password@localhost:5432/kommo_chat"
+    database_url: str = "sqlite+aiosqlite:///./data/kommo_chat.db"
 
     kommo_base_url: str = "https://admamoeduitcombr.kommo.com"
     kommo_access_token: str = ""
