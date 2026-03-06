@@ -151,6 +151,19 @@ async def _get_prioritized_chats(
     )
     hot = list(hot_q.scalars().all())
 
+    never_polled_q = await db.execute(
+        select(MonitoredChat)
+        .where(
+            MonitoredChat.active == True,
+            MonitoredChat.last_message_at.is_(None),
+        )
+        .limit(MAX_WARM_PER_CYCLE)
+    )
+    never_polled = list(never_polled_q.scalars().all())
+    if never_polled:
+        logger.info("Chats recem-descobertos (nunca pollados): %d", len(never_polled))
+    hot = hot + never_polled
+
     if not include_warm and not include_cold:
         return hot
 
@@ -176,10 +189,10 @@ async def _get_prioritized_chats(
             select(MonitoredChat)
             .where(
                 MonitoredChat.active == True,
-                (MonitoredChat.last_message_at < warm_cutoff)
-                | (MonitoredChat.last_message_at.is_(None)),
+                MonitoredChat.last_message_at < warm_cutoff,
+                MonitoredChat.last_message_at.isnot(None),
             )
-            .order_by(MonitoredChat.last_message_at.desc().nulls_last())
+            .order_by(MonitoredChat.last_message_at.desc())
             .limit(MAX_COLD_PER_CYCLE)
         )
         cold = list(cold_q.scalars().all())
