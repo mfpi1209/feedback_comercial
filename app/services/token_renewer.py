@@ -199,7 +199,7 @@ async def run_token_renewer() -> None:
         settings.token_renewal_interval_hours,
     )
 
-    await asyncio.sleep(10)
+    await asyncio.sleep(120)
 
     while True:
         success = False

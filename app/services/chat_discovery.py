@@ -33,9 +33,12 @@ async def run_chat_discovery():
 
     while True:
         try:
+            logger.info("Discovery: iniciando busca de chats...")
             new_count = await discover_and_register_chats()
             if new_count > 0:
                 logger.info("Discovery: %d novos chats registrados para monitoramento", new_count)
+            else:
+                logger.info("Discovery: nenhum chat novo encontrado")
         except Exception:
             logger.exception("Erro no discovery de chats")
 

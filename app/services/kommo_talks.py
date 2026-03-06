@@ -86,8 +86,11 @@ async def list_all_talks(limit: int = 250) -> list[TalkInfo]:
     async with get_bearer_client() as client:
         params: dict = {"limit": 50, "offset": 0}
         while len(talks) < limit:
+            logger.debug("list_all_talks: aguardando rate limiter (offset=%d)...", params["offset"])
             await acquire()
+            logger.debug("list_all_talks: fazendo request (offset=%d)...", params["offset"])
             resp = await client.get("/api/v4/talks", params=params)
+            logger.debug("list_all_talks: resposta HTTP %d (offset=%d)", resp.status_code, params["offset"])
             if resp.status_code == 429:
                 logger.warning("Rate limit 429 na Talks API. Aguardando 60s...")
                 await asyncio.sleep(60)
