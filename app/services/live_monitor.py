@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def _build_message_payload(msg, chat) -> dict:
-    """Monta o payload da mensagem para Supabase e n8n."""
+    """Monta o payload da mensagem para n8n com metadados enriquecidos do inbox."""
     direction = "inbound" if msg.sender_type == "contact" else "outbound"
     consultor = msg.sender_name if msg.sender_type == "user" else None
     sent_at_iso = msg.sent_at.isoformat() if msg.sent_at else None
@@ -33,7 +33,8 @@ def _build_message_payload(msg, chat) -> dict:
         "chat_id": msg.chat_id or chat.chat_id,
         "contact_id": chat.contact_id,
         "lead_id": chat.lead_id or 0,
-        "lead_nome": chat.label,
+        "lead_nome": getattr(chat, "lead_nome", None) or chat.label,
+        "contact_name": getattr(chat, "contact_name", None),
         "direction": direction,
         "sender_type": msg.sender_type,
         "sender_name": msg.sender_name,
@@ -42,7 +43,11 @@ def _build_message_payload(msg, chat) -> dict:
         "media_url": msg.media_url,
         "sent_at": sent_at_iso,
         "consultor_responsavel": consultor,
-        "origin": msg.sender_origin,
+        "origin": msg.sender_origin or getattr(chat, "chat_source", None),
+        "responsible_user_id": getattr(chat, "responsible_user_id", None),
+        "pipeline_id": getattr(chat, "pipeline_id", None),
+        "status_id": getattr(chat, "status_id", None),
+        "chat_source": getattr(chat, "chat_source", None),
     }
 
 

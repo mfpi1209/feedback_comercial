@@ -20,3 +20,10 @@ class MonitoredChat(Base):
         DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )
     active: Mapped[bool] = mapped_column(default=True)
+
+    lead_nome: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    contact_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    responsible_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pipeline_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chat_source: Mapped[str | None] = mapped_column(String(64), nullable=True)

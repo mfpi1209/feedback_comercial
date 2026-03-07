@@ -30,6 +30,13 @@ class ChatMonitorOut(BaseModel):
     chat_id: str
     label: str | None
     lead_id: int | None
+    contact_id: int | None
+    lead_nome: str | None
+    contact_name: str | None
+    responsible_user_id: int | None
+    pipeline_id: int | None
+    status_id: int | None
+    chat_source: str | None
     last_message_uid: str | None
     last_message_at: datetime | None
     added_at: datetime
@@ -82,11 +89,67 @@ async def remove_chat(chat_id: str, db: AsyncSession = Depends(get_db)):
 @router.post("/discover")
 async def trigger_discovery():
     """
-    Dispara descoberta de chats agora (via Talks API).
-    Requer KOMMO_ACCESS_TOKEN configurado.
+    Dispara descoberta de chats agora.
+    Usa inbox AJAX (cookies) com fallback para Talks API.
     """
     new_count = await discover_and_register_chats()
     return {"status": "ok", "new_chats_found": new_count}
+
+
+@router.get("/inbox-diag")
+async def inbox_diagnostic(db: AsyncSession = Depends(get_db)):
+    """
+    Diagnóstico do discovery via inbox AJAX.
+    Busca 2 páginas e compara com chats monitorados.
+    """
+    from app.services.kommo_inbox import list_inbox_talks
+    from app.services.session_manager import is_configured as session_ok
+
+    existing = await db.execute(select(MonitoredChat))
+    known_ids = {r.chat_id for r in existing.scalars().all()}
+
+    if not session_ok():
+        return {
+            "source": "inbox",
+            "session_configured": False,
+            "error": "Cookies de sessão não configurados. Aguarde renovação de token via Playwright.",
+        }
+
+    talks = await list_inbox_talks(max_pages=2, known_chat_ids=known_ids)
+
+    if talks is None:
+        return {
+            "source": "inbox",
+            "session_configured": True,
+            "session_valid": False,
+            "error": "Sessão expirada (401/403). Será renovada automaticamente.",
+        }
+
+    new_ids = [t.chat_id for t in talks if t.chat_id not in known_ids]
+
+    return {
+        "source": "inbox",
+        "session_configured": True,
+        "session_valid": True,
+        "monitored_chats": len(known_ids),
+        "inbox_talks_found": len(talks),
+        "new_chat_ids": len(new_ids),
+        "sample_talks": [
+            {
+                "chat_id": t.chat_id[:12],
+                "lead_id": t.lead_id,
+                "lead_nome": t.lead_nome,
+                "contact_id": t.contact_id,
+                "contact_name": t.contact_name,
+                "responsible_user_id": t.responsible_user_id,
+                "pipeline_id": t.pipeline_id,
+                "chat_source": t.chat_source,
+                "last_message": (t.last_message_text or "")[:80],
+                "is_new": t.chat_id not in known_ids,
+            }
+            for t in talks[:15]
+        ],
+    }
 
 
 @router.get("/status")

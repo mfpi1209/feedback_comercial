@@ -45,14 +45,10 @@ async def lifespan(app: FastAPI):
         )
 
     settings = get_settings()
-    if settings.kommo_access_token:
-        tasks.append(asyncio.create_task(run_chat_discovery()))
-        logger.info("Discovery automático de chats iniciado")
-    else:
-        logger.warning(
-            "KOMMO_ACCESS_TOKEN não configurado — discovery automático desabilitado. "
-            "Adicione chats manualmente via POST /api/kommo/monitor/chats"
-        )
+    tasks.append(asyncio.create_task(run_chat_discovery()))
+    logger.info(
+        "Discovery automático de chats iniciado (inbox AJAX + fallback Talks API)"
+    )
 
     tasks.append(asyncio.create_task(get_dispatcher().run()))
     logger.info("Dispatcher n8n iniciado")

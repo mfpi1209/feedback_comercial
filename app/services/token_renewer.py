@@ -88,6 +88,8 @@ async def renew_token_once() -> bool:
             update_token(token=token, refresh_token=refresh_token, expired_at=expired_at)
             _persist_to_env(token, refresh_token)
 
+            await _save_session_cookies(context)
+
             logger.info(
                 "Token renewer: token renovado com sucesso (expira em %ds)",
                 max(0, expired_at - int(_time.time())),
@@ -138,6 +140,17 @@ async def _wait_for_dashboard(page) -> None:
         if "login" in current.lower() or "auth" in current.lower():
             raise RuntimeError(f"Login falhou, ainda na pagina de auth: {current}")
         logger.debug("Token renewer: URL pos-login — %s", current)
+
+
+async def _save_session_cookies(context) -> None:
+    """Extrai cookies do browser context e salva no session_manager."""
+    try:
+        from app.services.session_manager import update_from_playwright_cookies
+        pw_cookies = await context.cookies()
+        update_from_playwright_cookies(pw_cookies)
+        logger.info("Token renewer: %d cookies de sessao salvos", len(pw_cookies))
+    except Exception:
+        logger.exception("Token renewer: erro ao salvar cookies de sessao")
 
 
 async def _extract_amojo_token(page) -> dict | None:
