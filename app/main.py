@@ -1,9 +1,20 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
+
+_SP_TZ = timezone(timedelta(hours=-3))
+
+
+class _SPFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=_SP_TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 from app.config import get_settings
 from app.database import init_db
@@ -21,10 +32,9 @@ from app.services.token_manager import init_from_settings, get_current_token
 from app.services.token_renewer import run_token_renewer
 from app.services.n8n_dispatcher import get_dispatcher
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+_handler = logging.StreamHandler()
+_handler.setFormatter(_SPFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 logger = logging.getLogger(__name__)
 
 
