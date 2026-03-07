@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 # ── Polling tiers ────────────────────────────────────────────────────────────
 # (name, max_age_of_last_message, min_interval_between_polls)
 TIERS: list[tuple[str, timedelta, timedelta]] = [
-    ("hot",    timedelta(minutes=30), timedelta(seconds=0)),
-    ("warm",   timedelta(hours=6),    timedelta(minutes=5)),
+    ("hot",    timedelta(minutes=30), timedelta(seconds=30)),
+    ("warm",   timedelta(hours=6),    timedelta(minutes=10)),
     ("cold",   timedelta(hours=48),   timedelta(minutes=30)),
     ("frozen", timedelta(days=3650),  timedelta(hours=2)),
 ]
