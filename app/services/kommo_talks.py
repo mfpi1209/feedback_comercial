@@ -79,36 +79,64 @@ async def list_talks_for_lead(lead_id: int) -> list[TalkInfo]:
 
 async def list_all_talks(limit: int = 0, known_chat_ids: set[str] | None = None) -> list[TalkInfo]:
     """
-    Lista conversas do Kommo, ordenadas por atividade mais recente.
-    Se known_chat_ids for fornecido, para de paginar quando uma pagina
-    inteira ja estiver no monitor (early stop para eficiencia).
+    Lista TODAS as conversas ativas (is_in_work) do Kommo.
+    Ordenadas por atividade mais recente para pegar novidades primeiro.
     """
     if not get_settings().kommo_access_token:
         logger.warning("KOMMO_ACCESS_TOKEN não configurado — Talks API indisponível")
         return []
+
+    all_talks: list[TalkInfo] = []
+
+    for is_in_work_filter in (True, False):
+        talks_batch = await _fetch_talks_page(
+            is_in_work=is_in_work_filter,
+            limit=limit,
+            known_chat_ids=known_chat_ids,
+            skip_early_stop=(is_in_work_filter is True),
+        )
+        all_talks.extend(talks_batch)
+
+        if is_in_work_filter is True:
+            logger.info("Talks ativas (is_in_work=true): %d", len(talks_batch))
+        else:
+            logger.info("Talks recentes inativas: %d", len(talks_batch))
+
+    logger.info("Total de talks listadas: %d", len(all_talks))
+    return all_talks
+
+
+async def _fetch_talks_page(
+    is_in_work: bool,
+    limit: int = 0,
+    known_chat_ids: set[str] | None = None,
+    skip_early_stop: bool = False,
+) -> list[TalkInfo]:
+    """Busca paginas da Talks API com filtro is_in_work."""
     talks: list[TalkInfo] = []
     consecutive_known_pages = 0
     async with get_bearer_client() as client:
-        params: dict = {"limit": 50, "offset": 0, "order[updated_at]": "desc"}
+        params: dict = {
+            "limit": 50,
+            "offset": 0,
+            "order[updated_at]": "desc",
+            "filter[is_in_work]": "true" if is_in_work else "false",
+        }
         while True:
-            logger.debug("list_all_talks: aguardando rate limiter (offset=%d)...", params["offset"])
             await acquire()
-            logger.debug("list_all_talks: fazendo request (offset=%d)...", params["offset"])
             resp = await client.get("/api/v4/talks", params=params)
-            logger.debug("list_all_talks: resposta HTTP %d (offset=%d)", resp.status_code, params["offset"])
             if resp.status_code == 429:
                 logger.warning("Rate limit 429 na Talks API. Aguardando 60s...")
                 await asyncio.sleep(60)
                 continue
+            if resp.status_code == 204:
+                break
             resp.raise_for_status()
             data = resp.json()
 
             items = data.get("_embedded", {}).get("talks", [])
             if not items:
                 break
-
-            if not talks:
-                logger.debug("Talks API — primeiro item: %s", list(items[0].keys()) if items else "vazio")
 
             new_on_this_page = 0
             for t in items:
@@ -135,13 +163,13 @@ async def list_all_talks(limit: int = 0, known_chat_ids: set[str] | None = None)
                 if known_chat_ids and chat_id not in known_chat_ids:
                     new_on_this_page += 1
 
-            if known_chat_ids is not None:
+            if not skip_early_stop and known_chat_ids is not None:
                 if new_on_this_page == 0:
                     consecutive_known_pages += 1
                     if consecutive_known_pages >= 3:
                         logger.info(
-                            "list_all_talks: 3 paginas consecutivas sem novos chats, parando (offset=%d, total=%d)",
-                            params["offset"], len(talks),
+                            "Early stop: 3 paginas sem novos chats (offset=%d, total=%d, is_in_work=%s)",
+                            params["offset"], len(talks), is_in_work,
                         )
                         break
                 else:
@@ -154,5 +182,4 @@ async def list_all_talks(limit: int = 0, known_chat_ids: set[str] | None = None)
             if limit > 0 and len(talks) >= limit:
                 break
 
-    logger.info("Total de talks listadas: %d", len(talks))
     return talks
