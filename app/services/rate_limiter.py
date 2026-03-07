@@ -15,7 +15,7 @@ from collections import deque
 logger = logging.getLogger(__name__)
 
 AMOJO_MAX_RPM = 380
-TALKS_MAX_RPM = 380
+TALKS_MAX_RPM = 40
 
 
 class _RateLimiter:
