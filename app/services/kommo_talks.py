@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from app.config import get_settings
 from app.services.kommo_auth import get_bearer_client
-from app.services.rate_limiter import acquire
+from app.services.rate_limiter import acquire_talks as acquire
 
 logger = logging.getLogger(__name__)
 
