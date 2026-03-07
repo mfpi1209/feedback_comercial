@@ -67,7 +67,9 @@ async def dashboard_stats(db: AsyncSession = Depends(get_db)):
     monitored = await db.execute(select(MonitoredChat))
     labels = {m.chat_id: m.label for m in monitored.scalars().all()}
 
+    from app.services.live_monitor import get_tier_stats
     n8n = get_dispatcher().get_stats()
+    tier_stats = get_tier_stats()
 
     token = get_token_state()
     token_info = {
@@ -82,6 +84,7 @@ async def dashboard_stats(db: AsyncSession = Depends(get_db)):
         "synced_chats": synced_chats.scalar(),
         "pending_sync_chats": pending_chats.scalar(),
         "rate_limit": get_usage(),
+        "polling_tiers": tier_stats,
         "by_type": {r[0]: r[1] for r in types.all()},
         "n8n": n8n,
         "token": token_info,
@@ -198,11 +201,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
-<div class="panel" style="margin-bottom:16px">
-  <h2>Rate Limit Kommo</h2>
-  <div class="rate">
-    <div class="rate-bar"><div class="rate-fill" id="rateBar"></div></div>
-    <div class="rate-text" id="rateText"></div>
+<div class="panels">
+  <div class="panel">
+    <h2>Rate Limit Kommo</h2>
+    <div class="rate">
+      <div class="rate-bar"><div class="rate-fill" id="rateBar"></div></div>
+      <div class="rate-text" id="rateText"></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Polling por Camada</h2>
+    <div id="tierInfo"></div>
   </div>
 </div>
 
@@ -301,6 +310,15 @@ async function refresh() {
     document.getElementById('rateBar').style.width = pct + '%';
     document.getElementById('rateBar').style.background = pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--orange)' : 'var(--green)';
     document.getElementById('rateText').textContent = `${rl.requests_last_minute} / ${rl.max_rpm} rpm`;
+
+    // Polling tiers
+    const pt = d.polling_tiers || {};
+    document.getElementById('tierInfo').innerHTML = `
+      <div class="kv"><span class="k">HOT (< 30 min)</span><span class="v" style="color:var(--red)">${pt.hot || 0}</span></div>
+      <div class="kv"><span class="k">WARM (< 6h)</span><span class="v" style="color:var(--orange)">${pt.warm || 0}</span></div>
+      <div class="kv"><span class="k">COLD (< 48h)</span><span class="v" style="color:var(--accent)">${pt.cold || 0}</span></div>
+      <div class="kv"><span class="k">FROZEN (> 48h)</span><span class="v" style="color:var(--dim)">${pt.frozen || 0}</span></div>
+    `;
 
     // Dispatch table
     const dispatches = n.recent || [];

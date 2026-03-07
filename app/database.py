@@ -45,6 +45,7 @@ async def _migrate_monitored_chats():
         "pipeline_id": "INTEGER",
         "status_id": "INTEGER",
         "chat_source": "TEXT",
+        "last_polled_at": "TIMESTAMP",
     }
     async with engine.begin() as conn:
         try:

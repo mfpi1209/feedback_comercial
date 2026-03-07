@@ -1,12 +1,16 @@
 """
 Monitor ao vivo de mensagens do Kommo.
-Faz polling dos chats registrados a cada N segundos,
-detecta mensagens novas e grava no banco automaticamente.
+
+Usa polling por camadas de atividade para minimizar requests:
+  HOT    (msg < 30 min)  → poll a cada ciclo
+  WARM   (msg < 6h)      → poll a cada 5 min
+  COLD   (msg < 48h)     → poll a cada 30 min
+  FROZEN (msg > 48h)     → poll a cada 2h
 """
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +24,47 @@ from app.services.token_manager import get_current_token
 from app.services.n8n_dispatcher import get_dispatcher
 
 logger = logging.getLogger(__name__)
+
+# ── Polling tiers ────────────────────────────────────────────────────────────
+# (name, max_age_of_last_message, min_interval_between_polls)
+TIERS: list[tuple[str, timedelta, timedelta]] = [
+    ("hot",    timedelta(minutes=30), timedelta(seconds=0)),
+    ("warm",   timedelta(hours=6),    timedelta(minutes=5)),
+    ("cold",   timedelta(hours=48),   timedelta(minutes=30)),
+    ("frozen", timedelta(days=3650),  timedelta(hours=2)),
+]
+
+_tier_stats: dict[str, int] = {"hot": 0, "warm": 0, "cold": 0, "frozen": 0}
+
+
+def get_tier_stats() -> dict[str, int]:
+    return dict(_tier_stats)
+
+
+def _classify_chat(chat: MonitoredChat, now: datetime) -> tuple[str, timedelta]:
+    """Returns (tier_name, min_poll_interval) for a chat."""
+    if chat.last_message_at is None:
+        return "hot", timedelta(seconds=0)
+
+    age = now - chat.last_message_at
+    for name, max_age, interval in TIERS:
+        if age < max_age:
+            return name, interval
+    return "frozen", TIERS[-1][2]
+
+
+def _is_due_for_poll(chat: MonitoredChat, now: datetime) -> tuple[bool, str]:
+    """Check if a chat should be polled this cycle."""
+    tier, interval = _classify_chat(chat, now)
+
+    if interval == timedelta(seconds=0):
+        return True, tier
+
+    if chat.last_polled_at is None:
+        return True, tier
+
+    elapsed = now - chat.last_polled_at
+    return elapsed >= interval, tier
 
 
 def _build_message_payload(msg, chat) -> dict:
@@ -60,16 +105,18 @@ MIN_CYCLE_SECONDS = 2
 CONCURRENT_POLLS = 8
 
 _cycle_count = 0
+_total_active = 0
 _semaphore: asyncio.Semaphore | None = None
 
 
 async def run_live_monitor():
-    """Loop principal do monitor -- polla TODOS os chats ativos a cada ciclo."""
-    global _cycle_count, _semaphore
+    """Loop principal — seleciona apenas chats elegíveis por camada a cada ciclo."""
+    global _cycle_count, _total_active, _semaphore
     _semaphore = asyncio.Semaphore(CONCURRENT_POLLS)
     logger.info(
-        "Monitor ao vivo iniciado (parallel=%d, ciclo_min=%ds)",
+        "Monitor ao vivo iniciado (parallel=%d, ciclo_min=%ds, tiers=%s)",
         CONCURRENT_POLLS, MIN_CYCLE_SECONDS,
+        [(t[0], str(t[2])) for t in TIERS],
     )
 
     while True:
@@ -83,15 +130,19 @@ async def run_live_monitor():
             _cycle_count += 1
 
             async with async_session() as db:
-                chats = await _get_all_active_chats(db)
+                due_chats, total, stats = await _get_chats_due_for_poll(db)
+                _total_active = total
+                _tier_stats.update(stats)
 
-            if chats:
-                total_new = await _poll_all_parallel(chats)
+            if due_chats:
+                total_new = await _poll_all_parallel(due_chats)
                 elapsed = asyncio.get_event_loop().time() - t0
 
                 logger.info(
-                    "Monitor ciclo #%d: %d chats pollados, %d novas msgs, %.1fs | %s",
-                    _cycle_count, len(chats), total_new, elapsed, get_usage(),
+                    "Monitor ciclo #%d: %d/%d chats pollados, %d novas msgs, "
+                    "%.1fs | tiers=%s | %s",
+                    _cycle_count, len(due_chats), total, total_new,
+                    elapsed, stats, get_usage(),
                 )
 
         except Exception:
@@ -103,7 +154,7 @@ async def run_live_monitor():
 
 
 async def _poll_all_parallel(chats: list) -> int:
-    """Faz polling de todos os chats em paralelo, limitado pelo semaforo."""
+    """Faz polling dos chats elegíveis em paralelo, limitado pelo semaforo."""
     results = await asyncio.gather(
         *[_poll_chat_safe(chat) for chat in chats],
         return_exceptions=True,
@@ -121,14 +172,31 @@ async def _poll_chat_safe(chat) -> int:
             return 0
 
 
-async def _get_all_active_chats(db: AsyncSession) -> list[MonitoredChat]:
-    """Retorna TODOS os chats ativos, sem distinção de prioridade."""
+async def _get_chats_due_for_poll(
+    db: AsyncSession,
+) -> tuple[list[MonitoredChat], int, dict[str, int]]:
+    """
+    Retorna apenas os chats cujo intervalo de polling expirou.
+    Returns: (chats_to_poll, total_active, tier_counts)
+    """
     result = await db.execute(
         select(MonitoredChat)
         .where(MonitoredChat.active == True)
         .order_by(MonitoredChat.last_message_at.desc().nullslast())
     )
-    return list(result.scalars().all())
+    all_active = list(result.scalars().all())
+
+    now = datetime.now(timezone.utc)
+    due: list[MonitoredChat] = []
+    counts: dict[str, int] = {"hot": 0, "warm": 0, "cold": 0, "frozen": 0}
+
+    for chat in all_active:
+        is_due, tier = _is_due_for_poll(chat, now)
+        counts[tier] = counts.get(tier, 0) + 1
+        if is_due:
+            due.append(chat)
+
+    return due, len(all_active), counts
 
 
 async def _poll_chat(chat: MonitoredChat) -> int:
@@ -181,7 +249,16 @@ async def _poll_chat(chat: MonitoredChat) -> int:
                 break
             offset += 50
 
+    now = datetime.now(timezone.utc)
+
     if not new_msgs:
+        async with async_session() as db:
+            await db.execute(
+                update(MonitoredChat)
+                .where(MonitoredChat.id == chat.id)
+                .values(last_polled_at=now)
+            )
+            await db.commit()
         return 0
 
     latest_uid = new_msgs[0].uid
@@ -217,15 +294,16 @@ async def _poll_chat(chat: MonitoredChat) -> int:
                 inserted += 1
                 _dispatch_message(_build_message_payload(msg, chat))
 
+        update_values = {"last_polled_at": now}
         if inserted > 0 or chat.last_message_uid is None:
-            await db.execute(
-                update(MonitoredChat)
-                .where(MonitoredChat.id == chat.id)
-                .values(
-                    last_message_uid=latest_uid,
-                    last_message_at=latest_at,
-                )
-            )
+            update_values["last_message_uid"] = latest_uid
+            update_values["last_message_at"] = latest_at
+
+        await db.execute(
+            update(MonitoredChat)
+            .where(MonitoredChat.id == chat.id)
+            .values(**update_values)
+        )
 
         await db.commit()
 

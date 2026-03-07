@@ -154,7 +154,9 @@ async def inbox_diagnostic(db: AsyncSession = Depends(get_db)):
 
 @router.get("/status")
 async def monitor_status(db: AsyncSession = Depends(get_db)):
-    """Retorna status geral do monitoramento."""
+    """Retorna status geral do monitoramento com métricas por camada de polling."""
+    from app.services.live_monitor import get_tier_stats
+
     total = await db.execute(
         select(MonitoredChat).where(MonitoredChat.active == True)
     )
@@ -162,6 +164,7 @@ async def monitor_status(db: AsyncSession = Depends(get_db)):
 
     return {
         "active_chats": len(chats),
+        "polling_tiers": get_tier_stats(),
         "rate_limit": get_usage(),
         "chats": [
             {

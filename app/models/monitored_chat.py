@@ -27,3 +27,4 @@ class MonitoredChat(Base):
     pipeline_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chat_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
