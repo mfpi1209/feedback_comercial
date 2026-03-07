@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import async_session, dialect_insert
 from app.models.message import KommoMessage
 from app.models.monitored_chat import MonitoredChat
-from app.services.kommo_chats import fetch_chat_history
+from app.services.kommo_chats import fetch_chat_history, fetch_full_chat_history
 from app.services.rate_limiter import get_usage
 from app.services.token_manager import get_current_token
 from app.services.n8n_dispatcher import get_dispatcher
@@ -110,41 +110,10 @@ async def _poll_chat_safe(chat) -> int:
     """Poll com semaforo para limitar concorrencia."""
     async with _semaphore:
         try:
-            if chat.last_message_uid is None:
-                await _silent_sync(chat)
-                return 0
             return await _poll_chat(chat)
         except Exception:
             logger.exception("Erro ao monitorar chat %s", chat.chat_id)
             return 0
-
-
-async def _silent_sync(chat: MonitoredChat) -> None:
-    """
-    Sync silencioso para chats nunca pollados: marca o ponteiro
-    na mensagem mais recente SEM despachar historico para o n8n.
-    A partir do proximo ciclo, apenas mensagens novas serao despachadas.
-    """
-    messages = await fetch_chat_history(chat.chat_id, limit=1, offset=0)
-    if not messages or not messages[0].uid:
-        return
-
-    latest = messages[0]
-    async with async_session() as db:
-        await db.execute(
-            update(MonitoredChat)
-            .where(MonitoredChat.id == chat.id)
-            .values(
-                last_message_uid=latest.uid,
-                last_message_at=latest.sent_at,
-            )
-        )
-        await db.commit()
-
-    logger.info(
-        "Sync silencioso: %s (%s) — ponteiro em %s",
-        chat.chat_id[:12], chat.label or "sem label", latest.uid[:12],
-    )
 
 
 async def _get_all_active_chats(db: AsyncSession) -> list[MonitoredChat]:
@@ -159,20 +128,53 @@ async def _get_all_active_chats(db: AsyncSession) -> list[MonitoredChat]:
 
 async def _poll_chat(chat: MonitoredChat) -> int:
     """
-    Verifica um chat por mensagens novas.
-    Busca a página mais recente, coleta as novas, e despacha em ordem cronológica.
+    Verifica um chat por mensagens novas. Nunca perde uma mensagem:
+    - Primeiro poll (sem ponteiro): busca historico COMPLETO com paginacao
+    - Polls seguintes: busca 50 mais recentes, pagina se necessario
+    Despacha tudo em ordem cronologica para o n8n.
     """
-    messages = await fetch_chat_history(chat.chat_id, limit=50, offset=0)
+    if chat.last_message_uid is None:
+        messages = await fetch_full_chat_history(chat.chat_id)
+        logger.info(
+            "Primeiro poll de %s (%s): %d mensagens historicas",
+            chat.chat_id[:12], chat.label or "sem label", len(messages),
+        )
+    else:
+        messages = await fetch_chat_history(chat.chat_id, limit=50, offset=0)
+
     if not messages:
         return 0
 
     new_msgs = []
+    found_marker = False
     for msg in messages:
         if not msg.uid:
             continue
         if chat.last_message_uid and msg.uid == chat.last_message_uid:
+            found_marker = True
             break
         new_msgs.append(msg)
+
+    if chat.last_message_uid and not found_marker and len(messages) >= 50:
+        logger.warning(
+            "Chat %s: >50 msgs novas, paginando para nao perder nenhuma...",
+            chat.chat_id[:12],
+        )
+        offset = 50
+        while not found_marker:
+            more = await fetch_chat_history(chat.chat_id, limit=50, offset=offset)
+            if not more:
+                break
+            for msg in more:
+                if not msg.uid:
+                    continue
+                if msg.uid == chat.last_message_uid:
+                    found_marker = True
+                    break
+                new_msgs.append(msg)
+            if len(more) < 50:
+                break
+            offset += 50
 
     if not new_msgs:
         return 0
@@ -210,7 +212,7 @@ async def _poll_chat(chat: MonitoredChat) -> int:
                 inserted += 1
                 _dispatch_message(_build_message_payload(msg, chat))
 
-        if inserted > 0:
+        if inserted > 0 or chat.last_message_uid is None:
             await db.execute(
                 update(MonitoredChat)
                 .where(MonitoredChat.id == chat.id)
