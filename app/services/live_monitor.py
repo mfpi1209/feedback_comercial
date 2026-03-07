@@ -41,12 +41,22 @@ def get_tier_stats() -> dict[str, int]:
     return dict(_tier_stats)
 
 
+def _ensure_aware(dt: datetime | None) -> datetime | None:
+    """Garante que um datetime é timezone-aware (UTC)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _classify_chat(chat: MonitoredChat, now: datetime) -> tuple[str, timedelta]:
     """Returns (tier_name, min_poll_interval) for a chat."""
-    if chat.last_message_at is None:
+    last_msg = _ensure_aware(chat.last_message_at)
+    if last_msg is None:
         return "hot", timedelta(seconds=0)
 
-    age = now - chat.last_message_at
+    age = now - last_msg
     for name, max_age, interval in TIERS:
         if age < max_age:
             return name, interval
@@ -60,10 +70,11 @@ def _is_due_for_poll(chat: MonitoredChat, now: datetime) -> tuple[bool, str]:
     if interval == timedelta(seconds=0):
         return True, tier
 
-    if chat.last_polled_at is None:
+    last_polled = _ensure_aware(chat.last_polled_at)
+    if last_polled is None:
         return True, tier
 
-    elapsed = now - chat.last_polled_at
+    elapsed = now - last_polled
     return elapsed >= interval, tier
 
 
