@@ -16,7 +16,7 @@ from app.services.kommo_talks import list_all_talks
 
 logger = logging.getLogger(__name__)
 
-DISCOVERY_INTERVAL_SECONDS = 300
+DISCOVERY_INTERVAL_SECONDS = 120
 
 
 async def run_chat_discovery():
@@ -52,13 +52,19 @@ async def discover_and_register_chats() -> int:
     de chats já existentes que ainda não tinham esse dado.
     Retorna qtd de novos chats registrados.
     """
-    talks = await list_all_talks()
+    async with async_session() as db:
+        existing_rows = await db.execute(select(MonitoredChat))
+        existing_map: dict[str, MonitoredChat] = {
+            row.chat_id: row for row in existing_rows.scalars().all()
+        }
+
+    talks = await list_all_talks(known_chat_ids=set(existing_map.keys()))
     if not talks:
         return 0
 
     async with async_session() as db:
         existing_rows = await db.execute(select(MonitoredChat))
-        existing_map: dict[str, MonitoredChat] = {
+        existing_map = {
             row.chat_id: row for row in existing_rows.scalars().all()
         }
 

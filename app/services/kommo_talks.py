@@ -77,14 +77,19 @@ async def list_talks_for_lead(lead_id: int) -> list[TalkInfo]:
     return talks
 
 
-async def list_all_talks(limit: int = 0) -> list[TalkInfo]:
-    """Lista TODAS as conversas existentes no Kommo (sem limite artificial)."""
+async def list_all_talks(limit: int = 0, known_chat_ids: set[str] | None = None) -> list[TalkInfo]:
+    """
+    Lista conversas do Kommo, ordenadas por atividade mais recente.
+    Se known_chat_ids for fornecido, para de paginar quando uma pagina
+    inteira ja estiver no monitor (early stop para eficiencia).
+    """
     if not get_settings().kommo_access_token:
         logger.warning("KOMMO_ACCESS_TOKEN não configurado — Talks API indisponível")
         return []
     talks: list[TalkInfo] = []
+    consecutive_known_pages = 0
     async with get_bearer_client() as client:
-        params: dict = {"limit": 50, "offset": 0}
+        params: dict = {"limit": 50, "offset": 0, "order[updated_at]": "desc"}
         while True:
             logger.debug("list_all_talks: aguardando rate limiter (offset=%d)...", params["offset"])
             await acquire()
@@ -105,6 +110,7 @@ async def list_all_talks(limit: int = 0) -> list[TalkInfo]:
             if not talks:
                 logger.debug("Talks API — primeiro item: %s", list(items[0].keys()) if items else "vazio")
 
+            new_on_this_page = 0
             for t in items:
                 chat_id = t.get("chat_id", "")
                 if not chat_id:
@@ -125,6 +131,21 @@ async def list_all_talks(limit: int = 0) -> list[TalkInfo]:
                         created_at=t.get("created_at", 0),
                     )
                 )
+
+                if known_chat_ids and chat_id not in known_chat_ids:
+                    new_on_this_page += 1
+
+            if known_chat_ids is not None:
+                if new_on_this_page == 0:
+                    consecutive_known_pages += 1
+                    if consecutive_known_pages >= 3:
+                        logger.info(
+                            "list_all_talks: 3 paginas consecutivas sem novos chats, parando (offset=%d, total=%d)",
+                            params["offset"], len(talks),
+                        )
+                        break
+                else:
+                    consecutive_known_pages = 0
 
             if len(items) < 50:
                 break
