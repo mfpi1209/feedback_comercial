@@ -79,30 +79,21 @@ async def list_talks_for_lead(lead_id: int) -> list[TalkInfo]:
 
 async def list_all_talks(limit: int = 0, known_chat_ids: set[str] | None = None) -> list[TalkInfo]:
     """
-    Lista TODAS as conversas ativas (is_in_work) do Kommo.
-    Ordenadas por atividade mais recente para pegar novidades primeiro.
+    Lista conversas ativas (is_in_work=true) do Kommo.
+    Só busca as ativas — inativas não precisam de monitoramento.
     """
     if not get_settings().kommo_access_token:
         logger.warning("KOMMO_ACCESS_TOKEN não configurado — Talks API indisponível")
         return []
 
-    all_talks: list[TalkInfo] = []
+    all_talks = await _fetch_talks_page(
+        is_in_work=True,
+        limit=limit,
+        known_chat_ids=known_chat_ids,
+        skip_early_stop=True,
+    )
 
-    for is_in_work_filter in (True, False):
-        talks_batch = await _fetch_talks_page(
-            is_in_work=is_in_work_filter,
-            limit=limit,
-            known_chat_ids=known_chat_ids,
-            skip_early_stop=(is_in_work_filter is True),
-        )
-        all_talks.extend(talks_batch)
-
-        if is_in_work_filter is True:
-            logger.info("Talks ativas (is_in_work=true): %d", len(talks_batch))
-        else:
-            logger.info("Talks recentes inativas: %d", len(talks_batch))
-
-    logger.info("Total de talks listadas: %d", len(all_talks))
+    logger.info("Talks ativas descobertas: %d", len(all_talks))
     return all_talks
 
 
