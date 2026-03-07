@@ -11,7 +11,7 @@ from collections import deque
 
 logger = logging.getLogger(__name__)
 
-MAX_RPM = 200
+MAX_RPM = 380
 _timestamps: deque[float] = deque()
 _lock = asyncio.Lock()
 

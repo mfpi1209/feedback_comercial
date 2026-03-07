@@ -6,7 +6,7 @@ detecta mensagens novas e grava no banco automaticamente.
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,30 +51,24 @@ def _dispatch_message(payload: dict) -> None:
     get_dispatcher().enqueue({"event": "new_message", **payload})
 
 
-MIN_CYCLE_SECONDS = 3
-CONCURRENT_POLLS = 5
-
-TIER_HOT_HOURS = 2
-TIER_WARM_HOURS = 24
-WARM_EVERY_N = 20
-COLD_EVERY_N = 100
-MAX_WARM_PER_CYCLE = 50
-MAX_COLD_PER_CYCLE = 30
+MIN_CYCLE_SECONDS = 2
+CONCURRENT_POLLS = 8
 
 _cycle_count = 0
 _semaphore: asyncio.Semaphore | None = None
 
 
 async def run_live_monitor():
-    """Loop principal do monitor com polling paralelo por prioridade."""
+    """Loop principal do monitor -- polla TODOS os chats ativos a cada ciclo."""
     global _cycle_count, _semaphore
     _semaphore = asyncio.Semaphore(CONCURRENT_POLLS)
     logger.info(
-        "Monitor ao vivo iniciado (hot=%dh, parallel=%d, warm_cada=%d, cold_cada=%d)",
-        TIER_HOT_HOURS, CONCURRENT_POLLS, WARM_EVERY_N, COLD_EVERY_N,
+        "Monitor ao vivo iniciado (parallel=%d, ciclo_min=%ds)",
+        CONCURRENT_POLLS, MIN_CYCLE_SECONDS,
     )
 
     while True:
+        t0 = asyncio.get_event_loop().time()
         try:
             if not get_current_token():
                 logger.debug("Monitor: sem amojo token, aguardando...")
@@ -82,30 +76,25 @@ async def run_live_monitor():
                 continue
 
             _cycle_count += 1
-            include_warm = (_cycle_count % WARM_EVERY_N == 0)
-            include_cold = (_cycle_count % COLD_EVERY_N == 0)
 
             async with async_session() as db:
-                chats = await _get_prioritized_chats(db, include_warm, include_cold)
-
-            tier_label = "hot"
-            if include_cold:
-                tier_label = "hot+warm+cold"
-            elif include_warm:
-                tier_label = "hot+warm"
+                chats = await _get_all_active_chats(db)
 
             if chats:
                 total_new = await _poll_all_parallel(chats)
+                elapsed = asyncio.get_event_loop().time() - t0
 
                 logger.info(
-                    "Monitor ciclo #%d [%s]: %d chats, %d novas msgs | %s",
-                    _cycle_count, tier_label, len(chats), total_new, get_usage(),
+                    "Monitor ciclo #%d: %d chats pollados, %d novas msgs, %.1fs | %s",
+                    _cycle_count, len(chats), total_new, elapsed, get_usage(),
                 )
 
         except Exception:
             logger.exception("Erro no loop do monitor")
 
-        await asyncio.sleep(MIN_CYCLE_SECONDS)
+        elapsed = asyncio.get_event_loop().time() - t0
+        sleep_time = max(MIN_CYCLE_SECONDS - elapsed, 0.5)
+        await asyncio.sleep(sleep_time)
 
 
 async def _poll_all_parallel(chats: list) -> int:
@@ -158,85 +147,14 @@ async def _silent_sync(chat: MonitoredChat) -> None:
     )
 
 
-async def _get_prioritized_chats(
-    db: AsyncSession,
-    include_warm: bool,
-    include_cold: bool,
-) -> list[MonitoredChat]:
-    """
-    Polling por prioridade:
-    - HOT (atividade nas ultimas TIER_HOT_HOURS): sempre
-    - WARM (atividade nas ultimas TIER_WARM_HOURS): a cada WARM_EVERY_N ciclos
-    - COLD (sem atividade / muito antigo): a cada COLD_EVERY_N ciclos
-    """
-    now = datetime.now(timezone.utc)
-    hot_cutoff = now - timedelta(hours=TIER_HOT_HOURS)
-
-    hot_q = await db.execute(
+async def _get_all_active_chats(db: AsyncSession) -> list[MonitoredChat]:
+    """Retorna TODOS os chats ativos, sem distinção de prioridade."""
+    result = await db.execute(
         select(MonitoredChat)
-        .where(
-            MonitoredChat.active == True,
-            MonitoredChat.last_message_at >= hot_cutoff,
-        )
-        .order_by(MonitoredChat.last_message_at.desc())
+        .where(MonitoredChat.active == True)
+        .order_by(MonitoredChat.last_message_at.desc().nullslast())
     )
-    hot = list(hot_q.scalars().all())
-
-    never_polled_q = await db.execute(
-        select(MonitoredChat)
-        .where(
-            MonitoredChat.active == True,
-            MonitoredChat.last_message_at.is_(None),
-        )
-        .limit(MAX_WARM_PER_CYCLE)
-    )
-    never_polled = list(never_polled_q.scalars().all())
-    if never_polled:
-        logger.info("Chats recem-descobertos (nunca pollados): %d", len(never_polled))
-    hot = hot + never_polled
-
-    if not include_warm and not include_cold:
-        return hot
-
-    warm_cutoff = now - timedelta(hours=TIER_WARM_HOURS)
-
-    if include_warm or include_cold:
-        warm_q = await db.execute(
-            select(MonitoredChat)
-            .where(
-                MonitoredChat.active == True,
-                MonitoredChat.last_message_at < hot_cutoff,
-                MonitoredChat.last_message_at >= warm_cutoff,
-            )
-            .order_by(MonitoredChat.last_message_at.desc())
-            .limit(MAX_WARM_PER_CYCLE)
-        )
-        warm = list(warm_q.scalars().all())
-    else:
-        warm = []
-
-    if include_cold:
-        cold_q = await db.execute(
-            select(MonitoredChat)
-            .where(
-                MonitoredChat.active == True,
-                MonitoredChat.last_message_at < warm_cutoff,
-                MonitoredChat.last_message_at.isnot(None),
-            )
-            .order_by(MonitoredChat.last_message_at.desc())
-            .limit(MAX_COLD_PER_CYCLE)
-        )
-        cold = list(cold_q.scalars().all())
-    else:
-        cold = []
-
-    total = hot + warm + cold
-    if include_warm or include_cold:
-        logger.info(
-            "Chats selecionados: %d hot + %d warm + %d cold = %d total",
-            len(hot), len(warm), len(cold), len(total),
-        )
-    return total
+    return list(result.scalars().all())
 
 
 async def _poll_chat(chat: MonitoredChat) -> int:

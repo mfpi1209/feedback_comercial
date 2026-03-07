@@ -30,7 +30,7 @@ async def sync_messages_for_lead(lead_id: int, db: AsyncSession) -> int:
 
 async def sync_all_messages() -> int:
     """Sincroniza mensagens de todas as conversas recentes. Roda em background."""
-    talks = await list_all_talks(limit=500)
+    talks = await list_all_talks()
     total = 0
 
     async with async_session() as db:

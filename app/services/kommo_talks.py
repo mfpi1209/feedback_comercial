@@ -77,15 +77,15 @@ async def list_talks_for_lead(lead_id: int) -> list[TalkInfo]:
     return talks
 
 
-async def list_all_talks(limit: int = 250) -> list[TalkInfo]:
-    """Lista todas as conversas recentes (até `limit`)."""
+async def list_all_talks(limit: int = 0) -> list[TalkInfo]:
+    """Lista TODAS as conversas existentes no Kommo (sem limite artificial)."""
     if not get_settings().kommo_access_token:
         logger.warning("KOMMO_ACCESS_TOKEN não configurado — Talks API indisponível")
         return []
     talks: list[TalkInfo] = []
     async with get_bearer_client() as client:
         params: dict = {"limit": 50, "offset": 0}
-        while len(talks) < limit:
+        while True:
             logger.debug("list_all_talks: aguardando rate limiter (offset=%d)...", params["offset"])
             await acquire()
             logger.debug("list_all_talks: fazendo request (offset=%d)...", params["offset"])
@@ -129,6 +129,9 @@ async def list_all_talks(limit: int = 250) -> list[TalkInfo]:
             if len(items) < 50:
                 break
             params["offset"] += 50
+
+            if limit > 0 and len(talks) >= limit:
+                break
 
     logger.info("Total de talks listadas: %d", len(talks))
     return talks
