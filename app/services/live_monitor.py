@@ -2,8 +2,8 @@
 Monitor ao vivo de mensagens do Kommo.
 
 Usa polling por camadas de atividade para minimizar requests:
-  HOT    (msg < 30 min)  → poll a cada 1 min
-  WARM   (msg < 6h)      → poll a cada 20 min
+  HOT    (msg < 30 min)  → poll a cada 20s
+  WARM   (msg < 6h)      → poll a cada 10 min
   COLD   (msg < 48h)     → sem polling (discovery promove pra HOT se houver atividade)
   FROZEN (msg > 48h)     → sem polling (discovery promove pra HOT se houver atividade)
 """
@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 SKIP_TIERS = {"cold", "frozen"}
 
 TIERS: list[tuple[str, timedelta, timedelta]] = [
-    ("hot",    timedelta(minutes=30), timedelta(minutes=1)),
-    ("warm",   timedelta(hours=6),    timedelta(minutes=20)),
+    ("hot",    timedelta(minutes=30), timedelta(seconds=20)),
+    ("warm",   timedelta(hours=6),    timedelta(minutes=10)),
     ("cold",   timedelta(hours=48),   timedelta(0)),
     ("frozen", timedelta(days=3650),  timedelta(0)),
 ]
