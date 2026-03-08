@@ -4,8 +4,8 @@ Monitor ao vivo de mensagens do Kommo.
 Usa polling por camadas de atividade para minimizar requests:
   HOT    (msg < 30 min)  → poll a cada 1 min
   WARM   (msg < 6h)      → poll a cada 20 min
-  COLD   (msg < 48h)     → poll a cada 1h
-  FROZEN (msg > 48h)     → poll a cada 4h
+  COLD   (msg < 48h)     → sem polling (discovery promove pra HOT se houver atividade)
+  FROZEN (msg > 48h)     → sem polling (discovery promove pra HOT se houver atividade)
 """
 
 import asyncio
@@ -27,11 +27,13 @@ logger = logging.getLogger(__name__)
 
 # ── Polling tiers ────────────────────────────────────────────────────────────
 # (name, max_age_of_last_message, min_interval_between_polls)
+SKIP_TIERS = {"cold", "frozen"}
+
 TIERS: list[tuple[str, timedelta, timedelta]] = [
     ("hot",    timedelta(minutes=30), timedelta(minutes=1)),
     ("warm",   timedelta(hours=6),    timedelta(minutes=20)),
-    ("cold",   timedelta(hours=48),   timedelta(hours=1)),
-    ("frozen", timedelta(days=3650),  timedelta(hours=4)),
+    ("cold",   timedelta(hours=48),   timedelta(0)),
+    ("frozen", timedelta(days=3650),  timedelta(0)),
 ]
 
 _tier_stats: dict[str, int] = {"hot": 0, "warm": 0, "cold": 0, "frozen": 0}
@@ -204,6 +206,8 @@ async def _get_chats_due_for_poll(
     for chat in all_active:
         is_due, tier = _is_due_for_poll(chat, now)
         counts[tier] = counts.get(tier, 0) + 1
+        if tier in SKIP_TIERS:
+            continue
         if is_due:
             due.append(chat)
 

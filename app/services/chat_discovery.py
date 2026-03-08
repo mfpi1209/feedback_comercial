@@ -12,6 +12,7 @@ Fallback: Talks API (Bearer token)
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
@@ -198,6 +199,15 @@ def _update_chat_metadata(mon: MonitoredChat, talk: InboxTalk, label: str) -> bo
     if talk.chat_source and not mon.chat_source:
         mon.chat_source = talk.chat_source
         changed = True
+
+    if talk.last_message_at:
+        inbox_dt = datetime.fromtimestamp(talk.last_message_at, tz=timezone.utc)
+        stored_dt = mon.last_message_at
+        if stored_dt and stored_dt.tzinfo is None:
+            stored_dt = stored_dt.replace(tzinfo=timezone.utc)
+        if stored_dt is None or inbox_dt > stored_dt:
+            mon.last_message_at = inbox_dt
+            changed = True
 
     return changed
 
