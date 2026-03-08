@@ -2,10 +2,10 @@
 Monitor ao vivo de mensagens do Kommo.
 
 Usa polling por camadas de atividade para minimizar requests:
-  HOT    (msg < 30 min)  → poll a cada ciclo
-  WARM   (msg < 6h)      → poll a cada 5 min
-  COLD   (msg < 48h)     → poll a cada 30 min
-  FROZEN (msg > 48h)     → poll a cada 2h
+  HOT    (msg < 30 min)  → poll a cada 1 min
+  WARM   (msg < 6h)      → poll a cada 20 min
+  COLD   (msg < 48h)     → poll a cada 1h
+  FROZEN (msg > 48h)     → poll a cada 4h
 """
 
 import asyncio
@@ -28,10 +28,10 @@ logger = logging.getLogger(__name__)
 # ── Polling tiers ────────────────────────────────────────────────────────────
 # (name, max_age_of_last_message, min_interval_between_polls)
 TIERS: list[tuple[str, timedelta, timedelta]] = [
-    ("hot",    timedelta(minutes=30), timedelta(seconds=30)),
-    ("warm",   timedelta(hours=6),    timedelta(minutes=10)),
-    ("cold",   timedelta(hours=48),   timedelta(minutes=30)),
-    ("frozen", timedelta(days=3650),  timedelta(hours=2)),
+    ("hot",    timedelta(minutes=30), timedelta(minutes=1)),
+    ("warm",   timedelta(hours=6),    timedelta(minutes=20)),
+    ("cold",   timedelta(hours=48),   timedelta(hours=1)),
+    ("frozen", timedelta(days=3650),  timedelta(hours=4)),
 ]
 
 _tier_stats: dict[str, int] = {"hot": 0, "warm": 0, "cold": 0, "frozen": 0}
