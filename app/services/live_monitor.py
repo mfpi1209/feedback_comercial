@@ -1,9 +1,10 @@
 """
 Monitor ao vivo de mensagens do Kommo.
 
-Usa polling por camadas de atividade para minimizar requests:
-  HOT    (msg < 30 min)  → poll a cada 20s
-  WARM   (msg < 6h)      → poll a cada 10 min
+Polling dinâmico por camadas — intervalos ajustam automaticamente
+conforme a quantidade de chats em cada tier:
+  HOT    (msg < 30 min)  → orçamento 200 RPM, mínimo 10s, máximo 2 min
+  WARM   (msg < 6h)      → orçamento 100 RPM, mínimo 5 min, máximo 30 min
   COLD   (msg < 48h)     → sem polling (discovery promove pra HOT se houver atividade)
   FROZEN (msg > 48h)     → sem polling (discovery promove pra HOT se houver atividade)
 """
@@ -26,21 +27,28 @@ from app.services.n8n_dispatcher import get_dispatcher
 logger = logging.getLogger(__name__)
 
 # ── Polling tiers ────────────────────────────────────────────────────────────
-# (name, max_age_of_last_message, min_interval_between_polls)
+# (name, max_age_of_last_message)
 SKIP_TIERS = {"cold", "frozen"}
 
-TIERS: list[tuple[str, timedelta, timedelta]] = [
-    ("hot",    timedelta(minutes=30), timedelta(seconds=20)),
-    ("warm",   timedelta(hours=6),    timedelta(minutes=10)),
-    ("cold",   timedelta(hours=48),   timedelta(0)),
-    ("frozen", timedelta(days=3650),  timedelta(0)),
+TIER_AGES: list[tuple[str, timedelta]] = [
+    ("hot",    timedelta(minutes=30)),
+    ("warm",   timedelta(hours=6)),
+    ("cold",   timedelta(hours=48)),
+    ("frozen", timedelta(days=3650)),
 ]
 
+# (rpm_budget, min_interval, max_interval)
+TIER_BUDGETS: dict[str, tuple[int, timedelta, timedelta]] = {
+    "hot":  (200, timedelta(seconds=10),  timedelta(minutes=2)),
+    "warm": (100, timedelta(minutes=5),   timedelta(minutes=30)),
+}
+
 _tier_stats: dict[str, int] = {"hot": 0, "warm": 0, "cold": 0, "frozen": 0}
+_tier_intervals: dict[str, float] = {"hot": 10.0, "warm": 300.0}
 
 
 def get_tier_stats() -> dict[str, int]:
-    return dict(_tier_stats)
+    return {**_tier_stats, **{f"{k}_interval_s": v for k, v in _tier_intervals.items()}}
 
 
 def _ensure_aware(dt: datetime | None) -> datetime | None:
@@ -52,32 +60,46 @@ def _ensure_aware(dt: datetime | None) -> datetime | None:
     return dt
 
 
-def _classify_chat(chat: MonitoredChat, now: datetime) -> tuple[str, timedelta]:
-    """Returns (tier_name, min_poll_interval) for a chat."""
+def _classify_chat(chat: MonitoredChat, now: datetime) -> str:
+    """Returns tier name for a chat."""
     last_msg = _ensure_aware(chat.last_message_at)
     if last_msg is None:
-        return "hot", timedelta(seconds=0)
+        return "hot"
 
     age = now - last_msg
-    for name, max_age, interval in TIERS:
+    for name, max_age in TIER_AGES:
         if age < max_age:
-            return name, interval
-    return "frozen", TIERS[-1][2]
+            return name
+    return "frozen"
 
 
-def _is_due_for_poll(chat: MonitoredChat, now: datetime) -> tuple[bool, str]:
+def _compute_dynamic_intervals(counts: dict[str, int]) -> dict[str, timedelta]:
+    """Calcula intervalo de polling por tier baseado no orçamento de RPM."""
+    intervals: dict[str, timedelta] = {}
+    for tier, (budget_rpm, min_iv, max_iv) in TIER_BUDGETS.items():
+        n = counts.get(tier, 0)
+        if n == 0:
+            intervals[tier] = min_iv
+        else:
+            ideal = timedelta(seconds=(n / budget_rpm) * 60)
+            clamped = max(min_iv, min(ideal, max_iv))
+            intervals[tier] = clamped
+        _tier_intervals[tier] = intervals[tier].total_seconds()
+    return intervals
+
+
+def _is_due_for_poll(chat: MonitoredChat, now: datetime, tier: str, intervals: dict[str, timedelta]) -> bool:
     """Check if a chat should be polled this cycle."""
-    tier, interval = _classify_chat(chat, now)
-
-    if interval == timedelta(seconds=0):
-        return True, tier
+    interval = intervals.get(tier, timedelta(0))
+    if interval == timedelta(0):
+        return True
 
     last_polled = _ensure_aware(chat.last_polled_at)
     if last_polled is None:
-        return True, tier
+        return True
 
     elapsed = now - last_polled
-    return elapsed >= interval, tier
+    return elapsed >= interval
 
 
 def _build_message_payload(msg, chat) -> dict:
@@ -127,9 +149,9 @@ async def run_live_monitor():
     global _cycle_count, _total_active, _semaphore
     _semaphore = asyncio.Semaphore(CONCURRENT_POLLS)
     logger.info(
-        "Monitor ao vivo iniciado (parallel=%d, ciclo_min=%ds, tiers=%s)",
+        "Monitor ao vivo iniciado (parallel=%d, ciclo_min=%ds, budgets=%s)",
         CONCURRENT_POLLS, MIN_CYCLE_SECONDS,
-        [(t[0], str(t[2])) for t in TIERS],
+        {k: f"{v[0]}rpm" for k, v in TIER_BUDGETS.items()},
     )
 
     while True:
@@ -190,6 +212,7 @@ async def _get_chats_due_for_poll(
 ) -> tuple[list[MonitoredChat], int, dict[str, int]]:
     """
     Retorna apenas os chats cujo intervalo de polling expirou.
+    Intervalos são dinâmicos baseados no orçamento de RPM por tier.
     Returns: (chats_to_poll, total_active, tier_counts)
     """
     result = await db.execute(
@@ -200,15 +223,21 @@ async def _get_chats_due_for_poll(
     all_active = list(result.scalars().all())
 
     now = datetime.now(timezone.utc)
-    due: list[MonitoredChat] = []
     counts: dict[str, int] = {"hot": 0, "warm": 0, "cold": 0, "frozen": 0}
 
+    classified: list[tuple[MonitoredChat, str]] = []
     for chat in all_active:
-        is_due, tier = _is_due_for_poll(chat, now)
+        tier = _classify_chat(chat, now)
         counts[tier] = counts.get(tier, 0) + 1
+        classified.append((chat, tier))
+
+    intervals = _compute_dynamic_intervals(counts)
+
+    due: list[MonitoredChat] = []
+    for chat, tier in classified:
         if tier in SKIP_TIERS:
             continue
-        if is_due:
+        if _is_due_for_poll(chat, now, tier, intervals):
             due.append(chat)
 
     return due, len(all_active), counts
