@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 AMOJO_BASE = "https://amojo.kommo.com"
 REFRESH_MARGIN_SECONDS = 300  # renovar 5min antes de expirar
+_REFRESH_COOLDOWN = 60  # segundos entre tentativas de refresh
+_last_refresh_attempt: float = 0
 
 
 @dataclass
@@ -59,6 +61,13 @@ def is_token_expired() -> bool:
     return _state.is_expired
 
 
+def mark_token_valid() -> None:
+    """Chamado quando o Kommo aceita o token (200 OK) — estende validade."""
+    if _state.is_expired and _state.token:
+        _state.expired_at = int(time.time()) + 86400 * 2
+        logger.info("Token marcado como valido (Kommo retornou 200). Novo expiry: +48h")
+
+
 def get_token_state() -> dict:
     """Retorna o estado atual dos tokens (para debug/status)."""
     return {
@@ -84,11 +93,19 @@ def update_token(token: str, refresh_token: str = "", expired_at: int = 0):
 
 async def get_valid_token() -> str:
     """
-    Retorna um token válido. Se expirado, tenta refresh.
+    Retorna um token válido. Se expirado, tenta refresh (max 1x/min).
     Se refresh falhar, retorna o token atual (pode dar 401).
     """
+    global _last_refresh_attempt
+
     if not _state.is_expired:
         return _state.token
+
+    now = time.time()
+    if now - _last_refresh_attempt < _REFRESH_COOLDOWN:
+        return _state.token
+
+    _last_refresh_attempt = now
 
     if _state.refresh_token:
         refreshed = await _try_refresh()

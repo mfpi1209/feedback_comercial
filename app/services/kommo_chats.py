@@ -121,7 +121,7 @@ async def fetch_chat_history(
     }
 
     from app.services.rate_limiter import acquire
-    from app.services.token_manager import force_refresh
+    from app.services.token_manager import force_refresh, mark_token_valid
 
     messages: list[ChatMessage] = []
 
@@ -132,6 +132,8 @@ async def fetch_chat_history(
 
             if resp.status_code == 204:
                 return []
+            if resp.status_code == 200:
+                mark_token_valid()
             if resp.status_code == 401:
                 if attempt == 0:
                     logger.warning("x-auth-token 401 — tentando refresh e retry...")
