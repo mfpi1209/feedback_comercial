@@ -21,7 +21,7 @@ from app.models.message import KommoMessage
 from app.models.monitored_chat import MonitoredChat
 from app.services.kommo_chats import fetch_chat_history, fetch_full_chat_history
 from app.services.rate_limiter import get_usage
-from app.services.token_manager import get_current_token
+from app.services.token_manager import get_current_token, is_token_expired
 from app.services.n8n_dispatcher import get_dispatcher
 
 logger = logging.getLogger(__name__)
@@ -138,15 +138,17 @@ def _dispatch_message(payload: dict) -> None:
 
 MIN_CYCLE_SECONDS = 2
 CONCURRENT_POLLS = 8
+_TOKEN_PAUSE_SECONDS = 30
 
 _cycle_count = 0
 _total_active = 0
 _semaphore: asyncio.Semaphore | None = None
+_token_expired_logged = False
 
 
 async def run_live_monitor():
     """Loop principal — seleciona apenas chats elegíveis por camada a cada ciclo."""
-    global _cycle_count, _total_active, _semaphore
+    global _cycle_count, _total_active, _semaphore, _token_expired_logged
     _semaphore = asyncio.Semaphore(CONCURRENT_POLLS)
     logger.info(
         "Monitor ao vivo iniciado (parallel=%d, ciclo_min=%ds, budgets=%s)",
@@ -161,6 +163,26 @@ async def run_live_monitor():
                 logger.debug("Monitor: sem amojo token, aguardando...")
                 await asyncio.sleep(MIN_CYCLE_SECONDS)
                 continue
+
+            if is_token_expired():
+                if not _token_expired_logged:
+                    logger.warning(
+                        "Monitor: token expirado — polling PAUSADO. "
+                        "Solicitando renovacao de emergencia via Playwright..."
+                    )
+                    _token_expired_logged = True
+                    try:
+                        from app.services.token_renewer import request_emergency_renewal
+                        request_emergency_renewal()
+                    except Exception:
+                        logger.debug("Token renewer nao disponivel para emergencia")
+                await asyncio.sleep(_TOKEN_PAUSE_SECONDS)
+                if not is_token_expired():
+                    logger.info("Monitor: token renovado! Retomando polling.")
+                    _token_expired_logged = False
+                continue
+
+            _token_expired_logged = False
 
             _cycle_count += 1
 

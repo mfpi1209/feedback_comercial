@@ -54,6 +54,11 @@ def get_current_token() -> str:
     return _state.token
 
 
+def is_token_expired() -> bool:
+    """Retorna True se o token esta expirado ou ausente."""
+    return _state.is_expired
+
+
 def get_token_state() -> dict:
     """Retorna o estado atual dos tokens (para debug/status)."""
     return {

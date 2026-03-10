@@ -139,6 +139,11 @@ async def fetch_chat_history(
                     if refreshed:
                         continue
                 logger.error("x-auth-token expirado e refresh falhou. Atualize via PUT /api/kommo/token")
+                try:
+                    from app.services.token_renewer import request_emergency_renewal
+                    request_emergency_renewal()
+                except Exception:
+                    pass
                 return []
             if resp.status_code == 429:
                 logger.warning("Rate limit 429 do Kommo! Aguardando 60s...")

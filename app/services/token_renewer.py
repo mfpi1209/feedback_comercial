@@ -203,6 +203,9 @@ def _persist_to_env(token: str, refresh_token: str) -> None:
 _RENEWAL_HOUR = 3  # 3h da manha
 _SP_TZ = ZoneInfo("America/Sao_Paulo")
 
+_emergency_event: asyncio.Event | None = None
+_renewing = False
+
 
 def _seconds_until_next_run() -> float:
     """Calcula segundos ate o proximo horario de renovacao (3h SP)."""
@@ -213,40 +216,65 @@ def _seconds_until_next_run() -> float:
     return (target - now_sp).total_seconds()
 
 
+def request_emergency_renewal() -> None:
+    """Sinaliza que o token expirou e precisa de renovacao imediata."""
+    global _emergency_event
+    if _emergency_event is not None and not _renewing:
+        logger.warning("Token renewer: renovacao de emergencia solicitada!")
+        _emergency_event.set()
+
+
+async def _do_renewal(reason: str) -> bool:
+    """Executa ciclo de renovacao com retries."""
+    global _renewing
+    if _renewing:
+        return False
+    _renewing = True
+    try:
+        logger.info("Token renewer: iniciando renovacao (%s)...", reason)
+        for retry in range(_MAX_RETRIES):
+            try:
+                success = await renew_token_once()
+                if success:
+                    return True
+            except Exception:
+                logger.exception("Token renewer: tentativa %d/%d falhou", retry + 1, _MAX_RETRIES)
+            if retry < _MAX_RETRIES - 1:
+                logger.info("Token renewer: retry em %ds...", _RETRY_DELAY_SECONDS)
+                await asyncio.sleep(_RETRY_DELAY_SECONDS)
+        logger.error("Token renewer: todas as tentativas falharam (%s)", reason)
+        return False
+    finally:
+        _renewing = False
+
+
 async def run_token_renewer() -> None:
-    """Background loop que renova o token diariamente as 3h (America/Sao_Paulo)."""
+    """Background loop: renova as 3h SP + sob demanda via emergency event."""
+    global _emergency_event
+
     if not _is_configured():
         logger.warning(
             "Token renewer desabilitado: KOMMO_LOGIN_EMAIL / KOMMO_LOGIN_PASSWORD nao configurados"
         )
         return
 
+    _emergency_event = asyncio.Event()
+
     wait = _seconds_until_next_run()
     logger.info(
         "Token renewer iniciado — proxima renovacao em %.0f min (%02d:%02d SP)",
-        wait / 60,
-        (_RENEWAL_HOUR), 0,
+        wait / 60, _RENEWAL_HOUR, 0,
     )
 
     while True:
+        _emergency_event.clear()
         wait = _seconds_until_next_run()
-        await asyncio.sleep(wait)
 
-        logger.info("Token renewer: iniciando renovacao agendada (3h SP)...")
-        success = False
-        for retry in range(_MAX_RETRIES):
-            try:
-                success = await renew_token_once()
-                if success:
-                    break
-            except Exception:
-                logger.exception("Token renewer: tentativa %d/%d falhou", retry + 1, _MAX_RETRIES)
+        try:
+            await asyncio.wait_for(_emergency_event.wait(), timeout=wait)
+            reason = "emergencia — token expirado"
+        except asyncio.TimeoutError:
+            reason = "agendada 3h SP"
 
-            if retry < _MAX_RETRIES - 1:
-                logger.info("Token renewer: retry em %ds...", _RETRY_DELAY_SECONDS)
-                await asyncio.sleep(_RETRY_DELAY_SECONDS)
-
-        if not success:
-            logger.error("Token renewer: todas as tentativas falharam neste ciclo")
-
+        await _do_renewal(reason)
         await asyncio.sleep(60)
