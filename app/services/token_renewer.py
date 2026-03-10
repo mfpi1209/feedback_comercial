@@ -3,6 +3,8 @@ Renovacao automatica do amojo token via Playwright.
 
 Faz login headless no Kommo, extrai o amojo_token do localStorage
 e atualiza o token_manager em memoria + persiste no .env.
+
+Roda diariamente as 3h da manha (America/Sao_Paulo).
 """
 
 import asyncio
@@ -10,7 +12,9 @@ import json
 import logging
 import re
 import time as _time
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from app.config import get_settings
 from app.services.token_manager import update_token
@@ -196,25 +200,39 @@ def _persist_to_env(token: str, refresh_token: str) -> None:
         logger.exception("Token renewer: erro ao atualizar .env")
 
 
-async def run_token_renewer() -> None:
-    """Background loop que renova o token periodicamente."""
-    settings = get_settings()
-    interval = settings.token_renewal_interval_hours * 3600
+_RENEWAL_HOUR = 3  # 3h da manha
+_SP_TZ = ZoneInfo("America/Sao_Paulo")
 
+
+def _seconds_until_next_run() -> float:
+    """Calcula segundos ate o proximo horario de renovacao (3h SP)."""
+    now_sp = datetime.now(_SP_TZ)
+    target = datetime.combine(now_sp.date(), time(_RENEWAL_HOUR, 0), tzinfo=_SP_TZ)
+    if now_sp >= target:
+        target += timedelta(days=1)
+    return (target - now_sp).total_seconds()
+
+
+async def run_token_renewer() -> None:
+    """Background loop que renova o token diariamente as 3h (America/Sao_Paulo)."""
     if not _is_configured():
         logger.warning(
             "Token renewer desabilitado: KOMMO_LOGIN_EMAIL / KOMMO_LOGIN_PASSWORD nao configurados"
         )
         return
 
+    wait = _seconds_until_next_run()
     logger.info(
-        "Token renewer iniciado (intervalo=%dh)",
-        settings.token_renewal_interval_hours,
+        "Token renewer iniciado — proxima renovacao em %.0f min (%02d:%02d SP)",
+        wait / 60,
+        (_RENEWAL_HOUR), 0,
     )
 
-    await asyncio.sleep(120)
-
     while True:
+        wait = _seconds_until_next_run()
+        await asyncio.sleep(wait)
+
+        logger.info("Token renewer: iniciando renovacao agendada (3h SP)...")
         success = False
         for retry in range(_MAX_RETRIES):
             try:
@@ -231,4 +249,4 @@ async def run_token_renewer() -> None:
         if not success:
             logger.error("Token renewer: todas as tentativas falharam neste ciclo")
 
-        await asyncio.sleep(interval)
+        await asyncio.sleep(60)
