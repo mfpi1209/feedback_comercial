@@ -21,6 +21,7 @@ from app.database import init_db
 from app.routes.messages import router as messages_router
 from app.routes.webhook import router as webhook_router
 from app.routes.token import router as token_router
+from app.routes.session import router as session_router
 from app.routes.dashboard import router as dashboard_router
 from app.routes.monitor import router as monitor_router
 from app.routes.atendimento import router as atendimento_router
@@ -96,6 +97,7 @@ app.include_router(monitor_router)
 app.include_router(messages_router)
 app.include_router(webhook_router)
 app.include_router(token_router)
+app.include_router(session_router)
 app.include_router(atendimento_router)
 app.include_router(n8n_router)
 
