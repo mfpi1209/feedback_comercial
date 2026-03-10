@@ -102,6 +102,39 @@ def _is_due_for_poll(chat: MonitoredChat, now: datetime, tier: str, intervals: d
     return elapsed >= interval
 
 
+async def _enrich_pipeline_from_api(chat: MonitoredChat) -> None:
+    """Busca pipeline_id/status_id do lead na API do Kommo se faltante."""
+    if not chat.lead_id or chat.lead_id == 0:
+        return
+    if chat.pipeline_id:
+        return
+
+    try:
+        from app.services.kommo_auth import get_bearer_client
+        async with get_bearer_client() as client:
+            resp = await client.get(f"/api/v4/leads/{chat.lead_id}")
+            if resp.status_code == 200:
+                data = resp.json()
+                p_id = data.get("pipeline_id")
+                s_id = data.get("status_id")
+                if p_id:
+                    chat.pipeline_id = p_id
+                    chat.status_id = s_id
+                    async with async_session() as db:
+                        await db.execute(
+                            update(MonitoredChat)
+                            .where(MonitoredChat.id == chat.id)
+                            .values(pipeline_id=p_id, status_id=s_id)
+                        )
+                        await db.commit()
+                    logger.info(
+                        "Chat %s: pipeline enriquecido via API (lead=%d, pipeline=%d, status=%d)",
+                        chat.chat_id[:12], chat.lead_id, p_id, s_id or 0,
+                    )
+    except Exception:
+        logger.debug("Falha ao enriquecer pipeline para chat %s", chat.chat_id[:12])
+
+
 def _build_message_payload(msg, chat) -> dict:
     """Monta o payload da mensagem para n8n com metadados enriquecidos do inbox."""
     direction = "inbound" if msg.sender_type == "contact" else "outbound"
@@ -348,6 +381,8 @@ async def _poll_chat(chat: MonitoredChat) -> int:
     latest_at = new_msgs[0].sent_at
 
     new_msgs.reverse()
+
+    await _enrich_pipeline_from_api(chat)
 
     inserted = 0
     async with async_session() as db:
