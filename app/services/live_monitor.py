@@ -139,16 +139,39 @@ def _dispatch_message(payload: dict) -> None:
 MIN_CYCLE_SECONDS = 2
 CONCURRENT_POLLS = 8
 _TOKEN_PAUSE_SECONDS = 30
+_AUTH_FAIL_THRESHOLD = 3
 
 _cycle_count = 0
 _total_active = 0
 _semaphore: asyncio.Semaphore | None = None
-_token_expired_logged = False
+_consecutive_empty_cycles = 0
+_auth_paused = False
+
+
+def _notify_auth_failure() -> None:
+    """Chamado pelo monitor quando um ciclo retorna 0 msgs e token esta expirado."""
+    global _consecutive_empty_cycles, _auth_paused
+    if not is_token_expired():
+        _consecutive_empty_cycles = 0
+        return
+    _consecutive_empty_cycles += 1
+    if _consecutive_empty_cycles >= _AUTH_FAIL_THRESHOLD and not _auth_paused:
+        _auth_paused = True
+        logger.warning(
+            "Monitor: %d ciclos vazios com token expirado — polling PAUSADO. "
+            "Solicitando renovacao de emergencia via Playwright...",
+            _consecutive_empty_cycles,
+        )
+        try:
+            from app.services.token_renewer import request_emergency_renewal
+            request_emergency_renewal()
+        except Exception:
+            logger.debug("Token renewer nao disponivel para emergencia")
 
 
 async def run_live_monitor():
     """Loop principal — seleciona apenas chats elegíveis por camada a cada ciclo."""
-    global _cycle_count, _total_active, _semaphore, _token_expired_logged
+    global _cycle_count, _total_active, _semaphore, _auth_paused, _consecutive_empty_cycles
     _semaphore = asyncio.Semaphore(CONCURRENT_POLLS)
     logger.info(
         "Monitor ao vivo iniciado (parallel=%d, ciclo_min=%ds, budgets=%s)",
@@ -164,25 +187,14 @@ async def run_live_monitor():
                 await asyncio.sleep(MIN_CYCLE_SECONDS)
                 continue
 
-            if is_token_expired():
-                if not _token_expired_logged:
-                    logger.warning(
-                        "Monitor: token expirado — polling PAUSADO. "
-                        "Solicitando renovacao de emergencia via Playwright..."
-                    )
-                    _token_expired_logged = True
-                    try:
-                        from app.services.token_renewer import request_emergency_renewal
-                        request_emergency_renewal()
-                    except Exception:
-                        logger.debug("Token renewer nao disponivel para emergencia")
-                await asyncio.sleep(_TOKEN_PAUSE_SECONDS)
+            if _auth_paused:
                 if not is_token_expired():
                     logger.info("Monitor: token renovado! Retomando polling.")
-                    _token_expired_logged = False
-                continue
-
-            _token_expired_logged = False
+                    _auth_paused = False
+                    _consecutive_empty_cycles = 0
+                else:
+                    await asyncio.sleep(_TOKEN_PAUSE_SECONDS)
+                    continue
 
             _cycle_count += 1
 
@@ -194,6 +206,11 @@ async def run_live_monitor():
             if due_chats:
                 total_new = await _poll_all_parallel(due_chats)
                 elapsed = asyncio.get_event_loop().time() - t0
+
+                if total_new == 0 and is_token_expired():
+                    _notify_auth_failure()
+                else:
+                    _consecutive_empty_cycles = 0
 
                 logger.info(
                     "Monitor ciclo #%d: %d/%d chats pollados, %d novas msgs, "
