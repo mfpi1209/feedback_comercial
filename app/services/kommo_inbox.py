@@ -87,8 +87,9 @@ def _parse_talk(t: dict) -> InboxTalk | None:
 
 
 async def list_inbox_talks(
-    max_pages: int = 10,
+    max_pages: int = 20,
     known_chat_ids: set[str] | None = None,
+    known_last_message_at: dict[str, int] | None = None,
 ) -> list[InboxTalk] | None:
     """
     Lista conversas do inbox via AJAX endpoint interno do Kommo.
@@ -96,8 +97,10 @@ async def list_inbox_talks(
     Retorna None se a sessão estiver inválida (precisa refresh).
     Retorna lista vazia se não houver conversas.
 
-    Com known_chat_ids, faz early-stop após 2 páginas consecutivas
-    sem nenhum chat_id novo.
+    Early-stop inteligente: para após 2 páginas consecutivas sem
+    chats novos E sem chats com atividade mais recente que a armazenada.
+    Isso garante que chats atualizados recentemente (ex: consultor respondeu)
+    sejam sempre capturados.
     """
     if not is_configured():
         logger.debug("Inbox: session cookies nao configurados")
@@ -112,7 +115,7 @@ async def list_inbox_talks(
         "?limit=50&order%5Bsort_by%5D=last_message_at&order%5Bsort_type%5D=desc"
     )
     next_url: str | None = first_url
-    consecutive_known_pages = 0
+    consecutive_stale_pages = 0
 
     async with httpx.AsyncClient(
         cookies=cookies,
@@ -155,25 +158,32 @@ async def list_inbox_talks(
             if not items:
                 break
 
-            new_on_page = 0
+            active_on_page = 0
             for t in items:
                 talk = _parse_talk(t)
                 if talk:
                     talks.append(talk)
-                    if known_chat_ids and talk.chat_id not in known_chat_ids:
-                        new_on_page += 1
+                    is_new = known_chat_ids and talk.chat_id not in known_chat_ids
+                    is_updated = (
+                        known_last_message_at is not None
+                        and talk.chat_id in known_last_message_at
+                        and talk.last_message_at is not None
+                        and talk.last_message_at > known_last_message_at[talk.chat_id]
+                    )
+                    if is_new or is_updated:
+                        active_on_page += 1
 
             if known_chat_ids is not None:
-                if new_on_page == 0:
-                    consecutive_known_pages += 1
-                    if consecutive_known_pages >= 2:
+                if active_on_page == 0:
+                    consecutive_stale_pages += 1
+                    if consecutive_stale_pages >= 2:
                         logger.info(
-                            "Inbox early-stop: 2 páginas sem novos chats (página %d, total=%d)",
+                            "Inbox early-stop: 2 páginas sem atividade nova (página %d, total=%d)",
                             page + 1, len(talks),
                         )
                         break
                 else:
-                    consecutive_known_pages = 0
+                    consecutive_stale_pages = 0
 
             next_link = data.get("_links", {}).get("next", {}).get("href")
             if not next_link or len(items) < 50:
@@ -184,5 +194,5 @@ async def list_inbox_talks(
             if next_url:
                 await asyncio.sleep(0.3)
 
-    logger.info("Inbox: %d talks encontradas", len(talks))
+    logger.info("Inbox: %d talks encontradas (%d páginas)", len(talks), min(page + 1, max_pages))
     return talks

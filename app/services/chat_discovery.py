@@ -64,14 +64,29 @@ async def discover_and_register_chats() -> int:
         }
 
     known_ids = set(existing_map.keys())
+    known_timestamps: dict[str, int] = {}
+    for chat_id, mon in existing_map.items():
+        if mon.last_message_at:
+            ts = mon.last_message_at
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            known_timestamps[chat_id] = int(ts.timestamp())
 
-    inbox_talks = await list_inbox_talks(max_pages=10, known_chat_ids=known_ids)
+    inbox_talks = await list_inbox_talks(
+        max_pages=20,
+        known_chat_ids=known_ids,
+        known_last_message_at=known_timestamps,
+    )
 
     if inbox_talks is None:
         logger.warning("Discovery: inbox indisponível, tentando refresh de sessão...")
         refreshed = await _try_session_refresh()
         if refreshed:
-            inbox_talks = await list_inbox_talks(max_pages=10, known_chat_ids=known_ids)
+            inbox_talks = await list_inbox_talks(
+                max_pages=20,
+                known_chat_ids=known_ids,
+                known_last_message_at=known_timestamps,
+            )
 
     if inbox_talks is not None and len(inbox_talks) > 0:
         logger.info("Discovery via INBOX: %d talks encontradas", len(inbox_talks))
