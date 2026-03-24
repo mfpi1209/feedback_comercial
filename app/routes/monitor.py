@@ -205,20 +205,17 @@ async def chat_raw_messages(chat_id: str, limit: int = 5):
         for entry in items:
             author = entry.get("author") or {}
             recipient = entry.get("recipient") or {}
+            safe_author = {}
+            for k, v in author.items():
+                if isinstance(v, (str, int, float, bool, type(None))):
+                    safe_author[k] = v
+                else:
+                    safe_author[k] = str(v)[:200]
             result.append({
                 "message_id": entry.get("id", "")[:20],
                 "text": (entry.get("text") or "")[:60],
                 "created_at": entry.get("created_at"),
-                "author": {
-                    "id": author.get("id"),
-                    "name": author.get("name"),
-                    "full_name": author.get("full_name"),
-                    "origin": author.get("origin"),
-                    "all_keys": list(author.keys()),
-                    "profile_id": author.get("profile_id"),
-                    "ref_id": author.get("ref_id"),
-                    "client_id": author.get("client_id"),
-                },
+                "author_full": safe_author,
                 "recipient": {
                     "id": recipient.get("id"),
                     "name": recipient.get("name"),
