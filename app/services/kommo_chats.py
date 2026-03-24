@@ -38,26 +38,21 @@ class ChatMessage:
 
 def _resolve_user_name(author_id: str | None, amojo_name: str | None) -> str | None:
     """
-    Para mensagens de consultores (origin=amocrm), tenta mapear o author.id
+    Para mensagens de consultores (origin=amocrm), mapeia o author.id (UUID Amojo)
     para o nome real do usuario no Kommo CRM.
-    A Amojo API pode retornar nomes de canal/perfil ao inves do nome do usuario.
+    A Amojo API retorna nomes de perfil/canal que podem divergir do CRM.
     """
     if not author_id:
         return amojo_name
 
-    from app.services.kommo_users import get_cached_user_name
+    from app.services.kommo_users import get_cached_user_name_by_amojo_id
 
-    try:
-        uid = int(author_id)
-    except (ValueError, TypeError):
-        return amojo_name
-
-    crm_name = get_cached_user_name(uid)
+    crm_name = get_cached_user_name_by_amojo_id(author_id)
     if crm_name:
         if crm_name != amojo_name:
-            logger.debug(
-                "sender_name resolvido: amojo='%s' -> crm='%s' (user_id=%s)",
-                amojo_name, crm_name, author_id,
+            logger.info(
+                "sender_name corrigido: amojo='%s' -> crm='%s' (amojo_uuid=%s)",
+                amojo_name, crm_name, author_id[:12],
             )
         return crm_name
 
@@ -111,12 +106,6 @@ def _parse_message(entry: dict) -> ChatMessage:
 
     if sender_type == "user":
         resolved_name = _resolve_user_name(author_id, amojo_name)
-        if resolved_name == amojo_name and author_id:
-            logger.info(
-                "Outbound msg sem mapeamento CRM: author.id=%s, author.name='%s', "
-                "author_keys=%s",
-                author_id, amojo_name, list(author.keys()),
-            )
     else:
         resolved_name = amojo_name
 

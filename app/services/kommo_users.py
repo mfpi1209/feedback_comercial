@@ -1,7 +1,10 @@
 """
 Cache de usuarios do Kommo CRM.
 
-Busca /api/v4/users e mantem mapeamento user_id -> nome em memoria.
+Busca /api/v4/users?with=uuid,amojo_id e mantém dois mapeamentos:
+  - amojo_uuid (str) -> nome CRM   (usado para resolver author.id da Amojo API)
+  - crm_user_id (int) -> nome CRM  (usado para resolver responsible_user_id)
+
 Atualiza a cada 6 horas automaticamente.
 """
 
@@ -13,20 +16,25 @@ from app.services.kommo_auth import get_bearer_client
 
 logger = logging.getLogger(__name__)
 
-_user_map: dict[int, str] = {}
+_amojo_map: dict[str, str] = {}
+_crm_map: dict[int, str] = {}
 _last_refresh: float = 0
-_REFRESH_INTERVAL = 6 * 3600  # 6h
+_REFRESH_INTERVAL = 6 * 3600
 _lock = asyncio.Lock()
 
 
-async def _fetch_users() -> dict[int, str]:
-    """Busca lista de usuarios do Kommo e retorna {user_id: nome}."""
-    result: dict[int, str] = {}
+async def _fetch_users() -> tuple[dict[str, str], dict[int, str]]:
+    """Busca lista de usuarios do Kommo e retorna (amojo_uuid->nome, crm_id->nome)."""
+    amojo: dict[str, str] = {}
+    crm: dict[int, str] = {}
     try:
         async with get_bearer_client() as client:
             page = 1
             while True:
-                resp = await client.get("/api/v4/users", params={"page": page, "limit": 50})
+                resp = await client.get(
+                    "/api/v4/users",
+                    params={"page": page, "limit": 50, "with": "uuid,amojo_id"},
+                )
                 if resp.status_code != 200:
                     logger.warning("Kommo users API retornou %d", resp.status_code)
                     break
@@ -37,39 +45,51 @@ async def _fetch_users() -> dict[int, str]:
                 for u in users:
                     uid = u.get("id")
                     name = u.get("name", "")
+                    amojo_id = u.get("amojo_id", "")
                     if uid and name:
-                        result[uid] = name
+                        crm[uid] = name
+                    if amojo_id and name:
+                        amojo[amojo_id] = name
                 if len(users) < 50:
                     break
                 page += 1
-        logger.info("Kommo users cache: %d usuarios carregados", len(result))
+        logger.info(
+            "Kommo users cache: %d CRM users, %d amojo UUIDs mapeados",
+            len(crm), len(amojo),
+        )
+        for aid, n in amojo.items():
+            logger.debug("  amojo %s -> %s", aid[:12], n)
     except Exception:
         logger.exception("Erro ao buscar usuarios do Kommo")
-    return result
+    return amojo, crm
 
 
-async def get_user_map() -> dict[int, str]:
-    """Retorna mapeamento user_id -> nome, atualizando se necessario."""
-    global _user_map, _last_refresh
+async def _refresh_if_needed() -> None:
+    global _amojo_map, _crm_map, _last_refresh
     now = time.time()
-    if _user_map and (now - _last_refresh) < _REFRESH_INTERVAL:
-        return _user_map
+    if _amojo_map and (now - _last_refresh) < _REFRESH_INTERVAL:
+        return
 
     async with _lock:
-        if _user_map and (now - _last_refresh) < _REFRESH_INTERVAL:
-            return _user_map
-        fresh = await _fetch_users()
-        if fresh:
-            _user_map = fresh
+        if _amojo_map and (now - _last_refresh) < _REFRESH_INTERVAL:
+            return
+        amojo, crm = await _fetch_users()
+        if amojo:
+            _amojo_map = amojo
+            _crm_map = crm
             _last_refresh = now
-    return _user_map
+
+
+def get_cached_user_name_by_amojo_id(amojo_uuid: str) -> str | None:
+    """Busca nome CRM pelo amojo UUID (author.id da Amojo API)."""
+    return _amojo_map.get(amojo_uuid)
 
 
 def get_cached_user_name(user_id: int) -> str | None:
-    """Busca nome de usuario no cache (sem I/O). Retorna None se nao encontrado."""
-    return _user_map.get(user_id)
+    """Busca nome CRM pelo user_id inteiro."""
+    return _crm_map.get(user_id)
 
 
 async def ensure_loaded() -> None:
     """Garante que o cache esta carregado (chamar no startup)."""
-    await get_user_map()
+    await _refresh_if_needed()
