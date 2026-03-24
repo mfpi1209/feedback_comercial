@@ -36,6 +36,34 @@ class ChatMessage:
     sent_at: datetime
 
 
+def _resolve_user_name(author_id: str | None, amojo_name: str | None) -> str | None:
+    """
+    Para mensagens de consultores (origin=amocrm), tenta mapear o author.id
+    para o nome real do usuario no Kommo CRM.
+    A Amojo API pode retornar nomes de canal/perfil ao inves do nome do usuario.
+    """
+    if not author_id:
+        return amojo_name
+
+    from app.services.kommo_users import get_cached_user_name
+
+    try:
+        uid = int(author_id)
+    except (ValueError, TypeError):
+        return amojo_name
+
+    crm_name = get_cached_user_name(uid)
+    if crm_name:
+        if crm_name != amojo_name:
+            logger.debug(
+                "sender_name resolvido: amojo='%s' -> crm='%s' (user_id=%s)",
+                amojo_name, crm_name, author_id,
+            )
+        return crm_name
+
+    return amojo_name
+
+
 def _parse_message(entry: dict) -> ChatMessage:
     """Converte um item do array de mensagens retornado pela API v1."""
     author = entry.get("author") or {}
@@ -78,14 +106,28 @@ def _parse_message(entry: dict) -> ChatMessage:
         else datetime.now(timezone.utc)
     )
 
+    amojo_name = author.get("name") or author.get("full_name")
+    author_id = author.get("id")
+
+    if sender_type == "user":
+        resolved_name = _resolve_user_name(author_id, amojo_name)
+        if resolved_name == amojo_name and author_id:
+            logger.info(
+                "Outbound msg sem mapeamento CRM: author.id=%s, author.name='%s', "
+                "author_keys=%s",
+                author_id, amojo_name, list(author.keys()),
+            )
+    else:
+        resolved_name = amojo_name
+
     return ChatMessage(
         uid=entry.get("id", ""),
         text=entry.get("text") or message.get("text") or None,
         message_type=msg_type,
         media_url=media_url,
         media_file_name=message.get("media_file_name") or None,
-        sender_id=author.get("id"),
-        sender_name=author.get("name") or author.get("full_name"),
+        sender_id=author_id,
+        sender_name=resolved_name,
         sender_phone=sender_phone,
         sender_type=sender_type,
         sender_origin=origin or None,

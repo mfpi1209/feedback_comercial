@@ -32,6 +32,7 @@ from app.services.atendimento_detector import run_atendimento_detector
 from app.services.token_manager import init_from_settings, get_current_token
 from app.services.token_renewer import run_token_renewer
 from app.services.n8n_dispatcher import get_dispatcher
+from app.services.kommo_users import ensure_loaded as ensure_users_loaded
 
 _handler = logging.StreamHandler()
 _handler.setFormatter(_SPFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     await init_db()
     init_from_settings()
+    await ensure_users_loaded()
 
     tasks = []
 
