@@ -177,6 +177,62 @@ async def monitor_status(db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.get("/chat-raw/{chat_id}")
+async def chat_raw_messages(chat_id: str, limit: int = 5):
+    """
+    Retorna dados RAW da Amojo API para um chat, incluindo author completo.
+    Util para diagnosticar mapeamento de sender_name.
+    """
+    from app.config import get_settings
+    from app.services.kommo_auth import get_amojo_v1_client
+    from app.services.rate_limiter import acquire
+
+    settings = get_settings()
+    path = f"/v1/chats/{settings.kommo_amojo_id}/{chat_id}/messages"
+    params = {"with_video": "true", "stand": "v16", "limit": limit, "offset": 0}
+
+    async with await get_amojo_v1_client() as client:
+        await acquire()
+        resp = await client.get(path, params=params)
+
+        if resp.status_code != 200:
+            return {"error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
+
+        data = resp.json()
+        items = data if isinstance(data, list) else data.get("messages", [])
+
+        result = []
+        for entry in items:
+            author = entry.get("author") or {}
+            recipient = entry.get("recipient") or {}
+            result.append({
+                "message_id": entry.get("id", "")[:20],
+                "text": (entry.get("text") or "")[:60],
+                "created_at": entry.get("created_at"),
+                "author": {
+                    "id": author.get("id"),
+                    "name": author.get("name"),
+                    "full_name": author.get("full_name"),
+                    "origin": author.get("origin"),
+                    "all_keys": list(author.keys()),
+                    "profile_id": author.get("profile_id"),
+                    "ref_id": author.get("ref_id"),
+                    "client_id": author.get("client_id"),
+                },
+                "recipient": {
+                    "id": recipient.get("id"),
+                    "name": recipient.get("name"),
+                    "origin": recipient.get("origin"),
+                },
+            })
+
+        return {
+            "chat_id": chat_id,
+            "total_messages": len(items),
+            "messages": result,
+        }
+
+
 @router.get("/discovery-diag")
 async def discovery_diagnostic(db: AsyncSession = Depends(get_db)):
     """
